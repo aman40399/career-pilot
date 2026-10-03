@@ -12,7 +12,7 @@ dotenv.config();
 // ---------------------------------------------------------------------------
 // Supported provider identifiers
 // ---------------------------------------------------------------------------
-export const SUPPORTED_PROVIDERS = ['gemini', 'openai', 'openrouter', 'requesty', 'groq', 'custom'];
+export const SUPPORTED_PROVIDERS = ['gemini', 'openai', 'openrouter', 'requesty', 'groq', 'nvidia', 'custom'];
 
 // Default model names per provider (used when caller doesn't specify one)
 const DEFAULT_MODELS = {
@@ -21,6 +21,7 @@ const DEFAULT_MODELS = {
   openrouter: 'openai/gpt-4o-mini',   // OpenRouter uses "org/model" format
   requesty: 'openai/gpt-4o-mini',     // Requesty uses "org/model" format
   groq: 'llama-3.3-70b-versatile',
+  nvidia: 'nvidia/nemotron-3-super-120b-a12b',
   custom: 'gpt-3.5-turbo',
 };
 
@@ -179,6 +180,66 @@ class CustomAdapter {
   }
 }
 
+/**
+ * Adapter for NVIDIA NIM (OpenAI-compatible endpoints).
+ */
+class NvidiaAdapter {
+  constructor(apiKey, modelName, baseUrl) {
+    const key = apiKey || process.env.NVIDIA_API_KEY || process.env.OPENAI_API_KEY;
+    if (!key) {
+      throw new Error(
+        'NVIDIA API key is required. ' +
+        'Set NVIDIA_API_KEY in your .env file or provide it via the X-AI-Key header.'
+      );
+    }
+    this.client = new OpenAI({
+      apiKey: key,
+      baseURL: baseUrl || process.env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1',
+    });
+    this.modelName = modelName || process.env.NVIDIA_MODEL || DEFAULT_MODELS.nvidia;
+    this.providerName = 'nvidia';
+  }
+
+  async generateContent(prompt) {
+    aiCallsCounter.inc({ provider: this.providerName });
+    const completion = await this.client.chat.completions.create({
+      model: this.modelName,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.7,
+      max_tokens: 4096,
+    });
+    const u = completion.usage;
+    const usage = u
+      ? {
+          prompt: u.prompt_tokens ?? 0,
+          completion: u.completion_tokens ?? 0,
+          total: u.total_tokens ?? 0,
+        }
+      : undefined;
+    return { text: completion.choices[0]?.message?.content || '', usage };
+  }
+
+  async *generateContentStream(prompt) {
+    const completion = await this.client.chat.completions.create({
+      model: this.modelName,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.7,
+      max_tokens: 4096,
+      stream: true,
+    });
+    let fullText = '';
+    for await (const chunk of completion) {
+      const text = chunk.choices[0]?.delta?.content || '';
+      if (text) {
+        fullText += text;
+        yield { text, fullText };
+      }
+    }
+    const u = completion.usage;
+    yield { done: true, usage: u ? { prompt: u.prompt_tokens ?? 0, completion: u.completion_tokens ?? 0, total: u.total_tokens ?? 0 } : undefined };
+  }
+}
+
 
 /**
  * Adapter for Groq (via groq-sdk).
@@ -261,6 +322,8 @@ export function createAIProvider(provider, apiKey, modelName, baseUrl) {
       return new RequestyAdapter(apiKey, modelName);
     case 'groq':
       return new GroqAdapter(apiKey, modelName);
+    case 'nvidia':
+      return new NvidiaAdapter(apiKey, modelName, baseUrl);
     case 'custom':
       return new CustomAdapter(apiKey, modelName, baseUrl);
     default:
@@ -294,16 +357,23 @@ export function getDefaultProvider() {
   const envProvider = process.env.AI_PROVIDER;
   if (envProvider) {
     let envKey = null;
-    if (envProvider === 'gemini') envKey = process.env.GEMINI_API_KEY;
+    if (envProvider === 'nvidia') envKey = process.env.NVIDIA_API_KEY || process.env.OPENAI_API_KEY;
+    else if (envProvider === 'gemini') envKey = process.env.GEMINI_API_KEY;
     else if (envProvider === 'openai') envKey = process.env.OPENAI_API_KEY;
     else if (envProvider === 'groq') envKey = process.env.GROQ_API_KEY;
     else if (envProvider === 'openrouter') envKey = process.env.OPENROUTER_API_KEY;
     else if (envProvider === 'requesty') envKey = process.env.REQUESTY_API_KEY;
 
     if (envKey) {
-      _defaultProvider = createAIProvider(envProvider, envKey);
+      _defaultProvider = createAIProvider(envProvider, envKey, process.env.NVIDIA_MODEL);
       return _defaultProvider;
     }
+  }
+
+  const nvidiaApiKey = process.env.NVIDIA_API_KEY;
+  if (nvidiaApiKey) {
+    _defaultProvider = createAIProvider('nvidia', nvidiaApiKey, process.env.NVIDIA_MODEL);
+    return _defaultProvider;
   }
 
   const groqApiKey = process.env.GROQ_API_KEY;
@@ -319,14 +389,14 @@ export function getDefaultProvider() {
   }
 
   const geminiApiKey = process.env.GEMINI_API_KEY;
-  if (!geminiApiKey) {
-    throw new ApiError(
-      503,
-      'AI features are unavailable — Neither OPENAI_API_KEY nor GEMINI_API_KEY is configured. ' +
-      'Set one in your .env file or supply your own key via the X-AI-Key header.'
-    );
+  if (geminiApiKey) {
+    _defaultProvider = createAIProvider('gemini', geminiApiKey);
+    return _defaultProvider;
   }
 
-  _defaultProvider = createAIProvider('gemini', geminiApiKey);
-  return _defaultProvider;
+  throw new ApiError(
+    503,
+    'AI features are unavailable — neither NVIDIA_API_KEY, OPENAI_API_KEY nor GEMINI_API_KEY is configured. ' +
+    'Set one in your .env file or supply your own key via the X-AI-Key header.'
+  );
 }

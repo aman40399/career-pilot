@@ -1,7 +1,7 @@
 {
-  "name": "careerpilot",
+  "name": "xinterview",
   "version": "1.0.0",
-  "description": "Backend API for AI Resume Builder",
+  "description": "Backend API for xInterview Platform",
   "main": "src/index.js",
   "type": "module",
   "scripts": {

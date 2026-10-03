@@ -53,9 +53,9 @@ export const submitAnswerSchema = z.object({
   duration: z.number().min(0, 'duration must be a non-negative number'),
   expressionMetrics: z
     .object({
-      averageConfidence: z.number().min(0).max(1).optional().default(0),
+      averageConfidence: z.number().min(0).max(100).optional().default(0),
       eyeContactPercentage: z.number().min(0).max(100).optional().default(0),
-      headMovementStability: z.number().min(0).max(1).optional().default(0),
+      headMovementStability: z.number().min(0).max(100).optional().default(0),
       overallExpressionScore: z.number().min(0).max(100).optional().default(0),
     })
     .optional(),

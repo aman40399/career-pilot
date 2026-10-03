@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { motion } from "framer-motion";
-import { Brain, ChevronDown, Contrast, LineChart, Bug } from "lucide-react";
+import { Brain, ChevronDown, Contrast, LineChart, Bug, Mic, BookOpen } from "lucide-react";
 import AIProviderIndicator from "./settings/AIProviderIndicator";
 import ReportBugModal from "./ReportBugModal";
 
@@ -43,41 +43,40 @@ const navLinks = [
         href: "/dashboard",
         icon: <LayoutDashboard className="w-5 h-5 shrink-0" />,
     },
-
     {
-        label: "Resume Builder",
-        href: "/hub/resume",
+        label: "Resume Analysis",
+        href: "/resume-roast/analyze",
         icon: <FileText className="w-5 h-5 shrink-0" />,
     },
     {
-        label: "Job Finder",
-        href: "/hub/jobs",
-        icon: <Briefcase className="w-5 h-5 shrink-0" />,
+        label: "AI Interviewer",
+        href: "/mock-interview/practice?mode=technical",
+        icon: <Brain className="w-5 h-5 shrink-0" />,
     },
     {
-        label: "Portfolio Builder",
-        href: "/hub/portfolio",
-        icon: <Globe className="w-5 h-5 shrink-0" />,
+        label: "Communication Test",
+        href: "/mock-interview/practice?mode=behavioral",
+        icon: <Mic className="w-5 h-5 shrink-0" />,
     },
     {
-        label: "Career Growth",
-        href: "/hub/career",
-        icon: <GraduationCap className="w-5 h-5 shrink-0" />,
+        label: "Coding Test",
+        href: "/mock-interview/practice?mode=coding",
+        icon: <GitMerge className="w-5 h-5 shrink-0" />,
     },
     {
-        label: "Community Hub",
-        href: "/hub/community",
-        icon: <Users className="w-5 h-5 shrink-0" />,
+        label: "Tips & Material",
+        href: "/dashboard?modal=tips",
+        icon: <BookOpen className="w-5 h-5 shrink-0" />,
+    },
+    {
+        label: "Full Interview",
+        href: "/mock-interview/practice?mode=mixed",
+        icon: <Rocket className="w-5 h-5 shrink-0" />,
     },
     {
         label: "Profile",
         href: "/profile",
         icon: <User className="w-5 h-5 shrink-0" />,
-    },
-    {
-        label: "Security",
-        href: "/security",
-        icon: <ShieldCheck className="w-5 h-5 shrink-0" />,
     },
     {
         label: "Settings",

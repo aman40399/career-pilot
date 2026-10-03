@@ -252,7 +252,16 @@ router.post(
     audioUpload.single('audio'),
     asyncHandler(async (req, res) => {
         const { id } = req.params;
-        // Body is multipart — fields are strings; coerce & validate manually
+        let rawMetrics = req.body.expressionMetrics ? safeJsonParse(req.body.expressionMetrics) : undefined;
+        if (rawMetrics && typeof rawMetrics === 'object') {
+            if (typeof rawMetrics.averageConfidence === 'number' && rawMetrics.averageConfidence <= 1 && rawMetrics.averageConfidence > 0) {
+                rawMetrics.averageConfidence = Math.round(rawMetrics.averageConfidence * 100);
+            }
+            if (typeof rawMetrics.headMovementStability === 'number' && rawMetrics.headMovementStability <= 1 && rawMetrics.headMovementStability > 0) {
+                rawMetrics.headMovementStability = Math.round(rawMetrics.headMovementStability * 100);
+            }
+        }
+
         const body = {
             questionId: req.body.questionId,
             transcript: req.body.transcript,
@@ -260,7 +269,7 @@ router.post(
             code: req.body.code || null,
             codingLanguage: req.body.codingLanguage || undefined,
             isWarmup: req.body.isWarmup === 'true' || req.body.isWarmup === true,
-            expressionMetrics: req.body.expressionMetrics ? safeJsonParse(req.body.expressionMetrics) : undefined
+            expressionMetrics: rawMetrics
         };
 
         const parsed = submitAnswerSchema.safeParse(body);

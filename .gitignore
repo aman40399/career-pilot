@@ -91,6 +91,12 @@ issues/
 # Lint/output snapshots
 lint_output.txt
 
+# Database & Runtime Data
+backend/data/
+data/
+*.rdb
+dump.rdb
+
 # Misc
 *.pdf
 !resume.pdf

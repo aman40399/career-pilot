@@ -3,11 +3,15 @@ import { ApiError } from './errorHandler.js';
 
 const clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
 
+const isDevBypass = () =>
+  process.env.NODE_ENV === 'development' &&
+  (process.env.DEV_BYPASS_AUTH === 'true' || !process.env.CLERK_SECRET_KEY);
+
 const attachUserToReq = async (req, res, next) => {
   try {
     // Development bypass
-    if (process.env.NODE_ENV === 'development' && process.env.DEV_BYPASS_AUTH === 'true') {
-      const adminEmails = (process.env.ADMIN_EMAILS || '').split(',').map(e => e.trim().toLowerCase()).filter(Boolean);
+    if (isDevBypass()) {
+      const adminEmails = (process.env.ADMIN_EMAILS || 'dev@example.com').split(',').map(e => e.trim().toLowerCase()).filter(Boolean);
       const devEmail = (process.env.DEV_USER_EMAIL || 'dev@example.com').toLowerCase();
       req.user = {
         uid: process.env.DEV_USER_UID || 'dev-user-001',
@@ -15,7 +19,7 @@ const attachUserToReq = async (req, res, next) => {
         name: 'Local Dev User',
         picture: null,
         emailVerified: true,
-        isAdmin: adminEmails.includes(devEmail)
+        isAdmin: adminEmails.length === 0 || adminEmails.includes(devEmail)
       };
       return next();
     }
@@ -48,7 +52,7 @@ const attachUserToReq = async (req, res, next) => {
 };
 
 const enforceAuth = (req, res, next) => {
-  if (process.env.NODE_ENV === 'development' && process.env.DEV_BYPASS_AUTH === 'true') {
+  if (isDevBypass()) {
     return next();
   }
   if (!req.user) {
@@ -57,14 +61,23 @@ const enforceAuth = (req, res, next) => {
   next();
 };
 
+const clerkMiddlewareWrapper = (req, res, next) => {
+  if (isDevBypass()) return next();
+  try {
+    return clerkMiddleware()(req, res, next);
+  } catch {
+    return next();
+  }
+};
+
 export const verifyToken = [
-  clerkMiddleware(),
+  clerkMiddlewareWrapper,
   attachUserToReq,
   enforceAuth
 ];
 
 export const optionalAuth = [
-  clerkMiddleware(),
+  clerkMiddlewareWrapper,
   attachUserToReq
 ];
 

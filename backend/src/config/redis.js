@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-if (process.env.NODE_ENV === 'development') {
+if (process.env.NODE_ENV === 'development' && process.env.DISABLE_REDIS_MEMORY_SERVER !== 'true') {
     const url = process.env.REDIS_URL;
     if (!url || url.includes('localhost') || url.includes('127.0.0.1')) {
         console.log('🔄 Starting redis-memory-server to satisfy localhost REDIS_URL...');

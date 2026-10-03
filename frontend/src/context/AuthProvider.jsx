@@ -3,7 +3,9 @@ import { useUser, useAuth, useClerk } from '@clerk/clerk-react'
 import { AuthContext } from './AuthContext'
 import { authApi } from '../services/api'
 
-export function AuthProvider({ children }) {
+const HAS_CLERK = Boolean(import.meta.env.VITE_CLERK_PUBLISHABLE_KEY)
+
+function ClerkAuthProviderInner({ children }) {
   const { isLoaded, isSignedIn, user: clerkUser } = useUser()
   const { getToken: getClerkToken, signOut } = useAuth()
   const clerk = useClerk()
@@ -101,4 +103,83 @@ export function AuthProvider({ children }) {
       {children}
     </AuthContext.Provider>
   )
+}
+
+function LocalAuthProvider({ children }) {
+  const [user, setUser] = useState(() => {
+    try {
+      const saved = localStorage.getItem('careerpilot_local_user')
+      if (saved) return JSON.parse(saved)
+    } catch {}
+    return {
+      uid: 'dev-user-001',
+      email: 'dev@example.com',
+      displayName: 'Local Dev User',
+      photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=LocalDev',
+      isAdmin: true,
+      getIdToken: async () => 'mock-dev-token'
+    }
+  })
+
+  const login = async (email) => {
+    const logged = {
+      uid: 'dev-user-001',
+      email: email || 'dev@example.com',
+      displayName: email ? email.split('@')[0] : 'Local Dev User',
+      photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=LocalDev',
+      isAdmin: true,
+      getIdToken: async () => 'mock-dev-token'
+    }
+    setUser(logged)
+    localStorage.setItem('careerpilot_local_user', JSON.stringify(logged))
+    return logged
+  }
+
+  const signup = async (email, password, displayName) => {
+    const created = {
+      uid: 'dev-user-' + Date.now(),
+      email: email || 'dev@example.com',
+      displayName: displayName || (email ? email.split('@')[0] : 'Local Dev User'),
+      photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=LocalDev',
+      isAdmin: true,
+      getIdToken: async () => 'mock-dev-token'
+    }
+    setUser(created)
+    localStorage.setItem('careerpilot_local_user', JSON.stringify(created))
+    return created
+  }
+
+  const logout = async () => {
+    setUser(null)
+    localStorage.removeItem('careerpilot_local_user')
+  }
+
+  const getToken = async () => 'mock-dev-token'
+
+  const value = {
+    user,
+    loading: false,
+    isAdmin: user ? (user.isAdmin ?? true) : false,
+    signup,
+    login,
+    loginWithGoogle: () => login('google-user@example.com'),
+    loginWithLinkedIn: () => login('linkedin-user@example.com'),
+    loginWithGitHub: () => login('github-user@example.com'),
+    logout,
+    getToken,
+    isMockAuth: true
+  }
+
+  return (
+    <AuthContext.Provider value={value}>
+      {children}
+    </AuthContext.Provider>
+  )
+}
+
+export function AuthProvider({ children }) {
+  if (HAS_CLERK) {
+    return <ClerkAuthProviderInner>{children}</ClerkAuthProviderInner>
+  }
+  return <LocalAuthProvider>{children}</LocalAuthProvider>
 }

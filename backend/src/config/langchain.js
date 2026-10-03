@@ -762,17 +762,17 @@ export const generateRoast = async (resumeText, jobRole, aiProvider, determinist
 - Sections found: ${(deterministicScoring.sectionsFound || []).join(', ') || 'none'}`
     : '';
 
-  const prompt = `You are "Harsh But Fair" — a stand-up comedian who moonlights as a senior recruiter.
-Roast this resume ${roleClause}. Be witty, brutal, but ALWAYS end with 3 silver linings and 5 quick wins.
-Never punch down on protected characteristics (race, gender, age, disability, religion). Punch at the resume.
+  const prompt = `You are a Staff Technical Recruiter and ATS Benchmark Architect evaluating candidate engineering profiles.
+Provide a rigorous, constructive, high-precision technical analysis of this resume ${roleClause}.
+Focus on actionable engineering impact, quantifiable metrics (Google XYZ formula), keyword coverage, systems depth, and ATS parsing strengths.
 
 ${baselineClause}
 
-Rate these four axes 1-5 stars:
-- buzzwordDensity (5 = pristine, 1 = "synergy ninja guru rockstar")
-- actionVerbs (5 = "Architected, Shipped, Scaled", 1 = "Was responsible for duties")
-- quantifiedAchievements (5 = "increased revenue 32%", 1 = no numbers anywhere)
-- formatting (5 = scannable bullets + dates, 1 = wall of text)
+Rate these four axes 1-5:
+- buzzwordDensity (5 = high-signal engineering terminology with zero fluff, 1 = generic buzzwords)
+- actionVerbs (5 = strong leadership verbs like "Architected, Optimized, Shipped", 1 = passive "responsible for")
+- quantifiedAchievements (5 = rigorous metrics "reduced p99 latency 40%, saved $50k", 1 = no numbers)
+- formatting (5 = clean ATS scannable structure, modular bullet hierarchy, 1 = dense block)
 
 Resume:
 """
@@ -780,7 +780,19 @@ ${resumeText.slice(0, 12000)}
 """
 
 Return ONLY valid JSON matching this exact shape (no markdown fences, no commentary):
-${ROAST_JSON_SHAPE}`;
+{
+  "tagline": "<1-sentence executive summary of technical readiness and profile strengths>",
+  "ratings": {
+    "buzzwordDensity": <integer 1-5>,
+    "actionVerbs": <integer 1-5>,
+    "quantifiedAchievements": <integer 1-5>,
+    "formatting": <integer 1-5>
+  },
+  "roast": "<3 constructive, detailed paragraphs analyzing: 1) Technical Stack & Domain Alignment, 2) Quantitative Impact & Google XYZ Formula Adherence, 3) ATS Structural Optimization. Plain text, no markdown.>",
+  "silverLinings": ["<Standout Strength 1>", "<Standout Strength 2>", "<Standout Strength 3>"],
+  "quickWins": ["<Actionable Recommendation 1>", "<Actionable Recommendation 2>", "<Actionable Recommendation 3>", "<Actionable Recommendation 4>", "<Actionable Recommendation 5>"],
+  "emoji": "⚡"
+}`;
 
   const providerResult = await provider.generateContent(prompt);
   let text = String(providerResult.text || '').trim();

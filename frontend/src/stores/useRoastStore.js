@@ -20,7 +20,7 @@ export const useRoastStore = create(
       setError: (e) => set({ error: e, isLoading: false }),
       setResult: (result) =>
         set((s) => ({
-          lastResult: result,
+          lastResult: null,
           history: [result, ...s.history].slice(0, 25),
           isLoading: false,
           error: null,
@@ -31,7 +31,6 @@ export const useRoastStore = create(
     {
       name: 'resume-roast-v1',
       partialize: (s) => ({
-        lastResult: s.lastResult,
         history: s.history.slice(0, 10),
       }),
     }

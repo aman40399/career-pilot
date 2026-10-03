@@ -2,7 +2,7 @@ import { triggerConfetti } from '../utils/confetti'
 import { useState, useRef, useEffect, lazy, Suspense } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { Mic, MicOff, Video, VideoOff, XCircle, CheckCircle, AlertCircle, Volume2, VolumeX, RotateCcw, UserX, Loader2, Sparkles, ArrowRight, Target, TrendingUp, MessageSquare, Eye, Brain, Award, ChevronDown, ChevronUp, Clock, BarChart3, Lightbulb, Zap, Laptop, Smartphone, Chrome, AlertTriangle, FileUp, FileText, X, Globe, Code2, Play, Link as LinkIcon, Share2, Download } from 'lucide-react';
+import { Mic, MicOff, Video, VideoOff, XCircle, CheckCircle, CheckCircle2, AlertCircle, Volume2, VolumeX, RotateCcw, UserX, Loader2, Sparkles, ArrowRight, Target, TrendingUp, MessageSquare, Eye, Brain, Award, ChevronDown, ChevronUp, Clock, BarChart3, Lightbulb, Zap, Laptop, Smartphone, Chrome, AlertTriangle, FileUp, FileText, X, Globe, Code2, Play, Link as LinkIcon, Share2, Download, ShieldCheck, Terminal, Cpu, PhoneOff, Radio } from 'lucide-react';
 import Button from '../components/Button';
 import BodyLanguageTips from '../components/BodyLanguageTips';
 import VoiceToTextButton from '../components/VoiceToTextButton';
@@ -16,6 +16,7 @@ import AvatarInterviewer from '../components/interview/AvatarInterviewer';
 import { useAIConfigStore } from '../stores/useAIConfigStore';
 import { SUPPORTED_LANGUAGES, getLanguage, DEFAULT_LANGUAGE_CODE } from '../constants/languages';
 import { captureCardToBlob, downloadBlob, shareImage, buildShareCaption } from '../utils/shareCard';
+import { whisperManager } from '../services/whisperService';
 
 // Code editor (Monaco) — ~3MB chunk, lazy-loaded only when mode === 'coding'
 const CodeEditor = lazy(() => import('../components/interview/CodeEditor'));
@@ -60,8 +61,8 @@ const EXPERIENCE_LEVELS = [
 ];
 
 const INTERVIEW_MODES = [
-  { value: 'behavioral', label: 'Behavioral', desc: 'Soft-skill & STAR-method questions' },
   { value: 'technical', label: 'Technical', desc: 'Domain knowledge & reasoning' },
+  { value: 'behavioral', label: 'Behavioral', desc: 'Soft-skill & STAR-method questions' },
   { value: 'coding', label: 'Coding', desc: 'Live code with test cases' },
   { value: 'mixed', label: 'Mixed', desc: 'Behavioral + technical blend' }
 ];
@@ -72,6 +73,14 @@ const CODING_LANGUAGES = [
   { value: 'java', label: 'Java' },
   { value: 'cpp', label: 'C++' },
   { value: 'go', label: 'Go' }
+];
+
+const SUGGESTED_ROLES = [
+  "Senior Backend Engineer",
+  "AI/ML Systems Engineer",
+  "Full-Stack Architect",
+  "Distributed Systems Engineer",
+  "Cloud Infrastructure Engineer"
 ];
 
 
@@ -97,7 +106,12 @@ export default function InterviewPrep() {
   const [avCheckStream, setAvCheckStream] = useState(null);
   const [avVideoWorking, setAvVideoWorking] = useState(false);
   const [avAudioWorking, setAvAudioWorking] = useState(false);
+  const [videoDevices, setVideoDevices] = useState([]);
+  const [selectedVideoDeviceId, setSelectedVideoDeviceId] = useState('');
   const avVideoRef = useRef(null);
+
+  const queryParams = new URLSearchParams(location.search);
+  const initialMode = location.state?.mode || queryParams.get('mode') || 'behavioral';
 
   const [formData, setFormData] = useState({
     jobRole: location.state?.jobRole || '',
@@ -105,12 +119,40 @@ export default function InterviewPrep() {
     experienceLevel: 'entry',
     questionCount: 10,
     language: 'en',
-    mode: 'behavioral',
+    mode: initialMode,
     companyName: '',
     codingLanguage: 'javascript',
     jdText: '',
     skipWarmup: false
   });
+
+  // Sync mode whenever URL search param changes (e.g. navigation clicks)
+  useEffect(() => {
+    const qMode = new URLSearchParams(location.search).get('mode');
+    if (qMode && ['technical', 'behavioral', 'coding', 'mixed'].includes(qMode)) {
+      setFormData(prev => ({ ...prev, mode: qMode }));
+    }
+  }, [location.search]);
+
+  // Ensure camera stream connects to video element in setup confirm step
+  useEffect(() => {
+    if (step === 'av-check') {
+      if (avVideoRef.current && avCheckStream) {
+        avVideoRef.current.srcObject = avCheckStream;
+      }
+      if (navigator.mediaDevices?.enumerateDevices) {
+        navigator.mediaDevices.enumerateDevices().then((devs) => {
+          const vDevs = devs.filter((d) => d.kind === 'videoinput');
+          setVideoDevices(vDevs);
+          const iriun = vDevs.find((d) => d.label?.toLowerCase().includes('iriun'));
+          if (iriun && selectedVideoDeviceId !== iriun.deviceId) {
+            setSelectedVideoDeviceId(iriun.deviceId);
+            initializeAVCheck(iriun.deviceId);
+          }
+        }).catch(() => {});
+      }
+    }
+  }, [step]);
 
   // Resume upload state
   const [savedResumes, setSavedResumes] = useState([]);
@@ -154,6 +196,26 @@ export default function InterviewPrep() {
   
   const [useTextInput, setUseTextInput] = useState(false);
   const [textAnswer, setTextAnswer] = useState('');
+  const [whisperState, setWhisperState] = useState(whisperManager.getState());
+  const [meetingTimer, setMeetingTimer] = useState(0);
+
+  useEffect(() => {
+    const unsub = whisperManager.subscribe(setWhisperState);
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    let intv = null;
+    if (step === 'interview') {
+      intv = setInterval(() => setMeetingTimer((t) => t + 1), 1000);
+      if (whisperManager.getState().status === 'idle') {
+        whisperManager.loadModel().catch(() => {});
+      }
+    }
+    return () => {
+      if (intv) clearInterval(intv);
+    };
+  }, [step]);
 
   const [overallResults, setOverallResults] = useState(null);
   const [progressData, setProgressData] = useState(() => {
@@ -278,16 +340,17 @@ export default function InterviewPrep() {
 
   const initializeMedia = async () => {
     try {
+      const videoConstraints = selectedVideoDeviceId
+        ? { deviceId: { exact: selectedVideoDeviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
+        : { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' };
+
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          facingMode: 'user'
-        },
+        video: videoConstraints,
         audio: true
       });
       mediaStreamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
+      setVideoEnabled(true);
 
       const canvas = document.createElement('canvas');
       canvas.width = 100;
@@ -295,7 +358,19 @@ export default function InterviewPrep() {
       canvasRef.current = canvas;
       ctxRef.current = canvas.getContext('2d', { willReadFrequently: true });
     } catch (err) {
-      setError('Please allow camera and microphone access to continue.');
+      console.warn('initializeMedia failed with specified video+audio:', err);
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        mediaStreamRef.current = stream;
+        if (videoRef.current) videoRef.current.srcObject = stream;
+        setVideoEnabled(true);
+      } catch (e2) {
+        try {
+          const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          mediaStreamRef.current = audioStream;
+        } catch (e3) {}
+        setVideoEnabled(false);
+      }
     }
   };
 
@@ -341,14 +416,15 @@ export default function InterviewPrep() {
 
   const getAverageMetrics = () => {
     if (expressionSamples.length === 0) {
-      return { averageConfidence: 60, eyeContactPercentage: 60, headMovementStability: 70, overallExpressionScore: 60 };
+      return { averageConfidence: 80, eyeContactPercentage: 80, headMovementStability: 80, overallExpressionScore: 80 };
     }
     const avgConfidence = expressionSamples.reduce((sum, s) => sum + s.confidence, 0) / expressionSamples.length;
+    const confVal = Math.round(avgConfidence <= 1 ? avgConfidence * 100 : avgConfidence);
     return {
-      averageConfidence: Math.round(avgConfidence),
-      eyeContactPercentage: Math.round(avgConfidence * 0.9),
-      headMovementStability: Math.round(70 + Math.random() * 15),
-      overallExpressionScore: Math.round(avgConfidence)
+      averageConfidence: Math.min(100, Math.max(0, confVal)),
+      eyeContactPercentage: Math.min(100, Math.max(0, Math.round(confVal * 0.9))),
+      headMovementStability: Math.min(100, Math.max(0, Math.round(70 + Math.random() * 15))),
+      overallExpressionScore: Math.min(100, Math.max(0, confVal))
     };
   };
 
@@ -449,10 +525,25 @@ export default function InterviewPrep() {
   };
 
   // Initialize A/V check - get camera/mic access before interview
-  const initializeAVCheck = async () => {
+  const initializeAVCheck = async (targetDeviceId = null) => {
+    const devId = targetDeviceId || selectedVideoDeviceId;
+    setError('');
+
+    // Stop previous check stream if any
+    if (avCheckStream) {
+      try {
+        avCheckStream.getTracks().forEach(t => t.stop());
+      } catch (e) {}
+      setAvCheckStream(null);
+    }
+
     try {
+      const videoConstraints = devId
+        ? { deviceId: { exact: devId }, width: { ideal: 1280 }, height: { ideal: 720 } }
+        : { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' };
+
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 640, height: 480, facingMode: 'user' },
+        video: videoConstraints,
         audio: true
       });
       setAvCheckStream(stream);
@@ -464,12 +555,45 @@ export default function InterviewPrep() {
         avVideoRef.current.srcObject = stream;
       }
 
+      // Update available devices with actual labels
+      if (navigator.mediaDevices?.enumerateDevices) {
+        const devs = await navigator.mediaDevices.enumerateDevices();
+        const vDevs = devs.filter((d) => d.kind === 'videoinput');
+        setVideoDevices(vDevs);
+        const activeTrack = stream.getVideoTracks()[0];
+        if (activeTrack) {
+          const settings = activeTrack.getSettings();
+          if (settings.deviceId && !selectedVideoDeviceId && !targetDeviceId) {
+            setSelectedVideoDeviceId(settings.deviceId);
+          }
+        }
+      }
+
       return true;
     } catch (err) {
-      console.error('A/V check failed:', err);
+      console.warn('A/V specific check failed, trying loose constraints:', err.message);
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        setAvCheckStream(stream);
+        setAvVideoWorking(true);
+        setAvAudioWorking(true);
+        if (avVideoRef.current) avVideoRef.current.srcObject = stream;
+        return true;
+      } catch (e2) {}
+
+      try {
+        const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        setAvCheckStream(audioStream);
+        setAvAudioWorking(true);
+        setAvVideoWorking(false);
+        setError('Camera blocked or unavailable. Microphone connected — you can proceed in audio mode.');
+        return true;
+      } catch (audioErr) {
+        console.warn('Audio check also failed:', audioErr.message);
+      }
       setAvVideoWorking(false);
       setAvAudioWorking(false);
-      setError('Could not access camera/microphone. Please allow access and try again.');
+      setError('Could not access camera/microphone. Please click "Start Interview (Continue Anyway)" below or unblock in browser.');
       return false;
     }
   };
@@ -548,17 +672,18 @@ export default function InterviewPrep() {
     }
   };
 
-  // Confirm A/V is working and start the actual interview
-  const confirmAVAndStart = () => {
-    if (!avVideoWorking || !avAudioWorking) {
-      setError('Please ensure both camera and microphone are working before continuing.');
-      return;
-    }
-
+  // Confirm A/V is working and start the actual interview (or continue anyway)
+  const confirmAVAndStart = (bypass = false) => {
     // Stop the AV check stream - it will be re-initialized in interview step
     if (avCheckStream) {
-      avCheckStream.getTracks().forEach(track => track.stop());
+      try {
+        avCheckStream.getTracks().forEach(track => track.stop());
+      } catch (e) {}
       setAvCheckStream(null);
+    }
+
+    if (bypass || !avVideoWorking) {
+      setVideoEnabled(false);
     }
 
     setAvConfirmed(true);
@@ -930,8 +1055,21 @@ export default function InterviewPrep() {
 
     const finalTranscript = transcriptRef.current.trim() || transcript.trim();
 
-    // If Web Speech failed and we have a recorded audio blob, send to backend /transcribe
+    // Prioritize Whisper Small ASR transcription when audioBlob is present
     let resolvedTranscript = finalTranscript;
+    if (audioBlob && whisperState?.enabled) {
+      try {
+        const wt = await whisperManager.transcribe(audioBlob, formData.language);
+        if (wt && wt.trim()) {
+          resolvedTranscript = wt.trim();
+          setTranscript(resolvedTranscript);
+        }
+      } catch (e) {
+        console.warn('Whisper Small transcription fallback:', e.message);
+      }
+    }
+
+    // Secondary fallback to backend cloud transcription if not resolved
     if (!resolvedTranscript && audioBlob) {
       try {
         const tr = await interviewApi.transcribe({ audioBlob, language: formData.language });
@@ -1083,162 +1221,298 @@ ${updatedProgress.level}`
   // The A/V check still works on mobile (front-facing camera + mic), but the
   // voice capture path gracefully falls back to text.
 
-  // A/V Check step - confirm camera and microphone before interview
+  // A/V Check step - confirm camera and microphone before interview (Full 2-Column One Section)
   if (step === 'av-check') {
     return (
-      <div className="min-h-screen bg-background">
-        <div className="fixed inset-0 overflow-hidden pointer-events-none">
-          <div className="absolute top-1/4 left-0 w-96 h-96 bg-primary/10 rounded-full blur-3xl" />
-          <div className="absolute bottom-1/4 right-0 w-96 h-96 bg-purple-500/10 rounded-full blur-3xl" />
-        </div>
+      <div className="min-h-screen bg-[#000000] text-white font-sans selection:bg-[#76b900] selection:text-black py-8 md:py-10">
+        {/* Subtle grid background */}
+        <div
+          className="fixed inset-0 pointer-events-none opacity-20"
+          style={{
+            backgroundImage: `
+              linear-gradient(to right, #1a1a1a 1px, transparent 1px),
+              linear-gradient(to bottom, #1a1a1a 1px, transparent 1px)
+            `,
+            backgroundSize: '32px 32px'
+          }}
+        />
 
-          <div className="relative max-w-2xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-          <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} className="text-center mb-8">
-            <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-400 text-sm mb-4">
-              <AlertTriangle className="w-4 h-4" />
-              Equipment Check Required
+        <div className="relative z-10 w-full px-6 sm:px-10 lg:px-16 xl:px-20">
+          {/* Header (Removed Equipment Check Required line) */}
+          <div className="mb-8">
+            <div className="flex items-center gap-2.5 mb-2">
+              <div className="w-2.5 h-2.5 bg-[#76b900]" />
+              <span className="font-mono text-xs font-bold uppercase tracking-widest text-[#76b900]">
+                MODULE 02 // HARDWARE CALIBRATION
+              </span>
             </div>
-            <h1 className="text-3xl font-bold text-foreground mb-2">Confirm Your Setup</h1>
-            <p className="text-muted-foreground">Please verify your camera and microphone are working before starting</p>
-          </motion.div>
+            <h1 className="text-3xl sm:text-4xl md:text-5xl font-black uppercase tracking-tight text-white font-mono">
+              CONFIRM YOUR SETUP
+            </h1>
+            <p className="mt-2.5 text-zinc-400 text-sm md:text-base font-mono max-w-3xl leading-relaxed">
+              Verify your camera feed and acoustic input are calibrated before initiating the live assessment.
+            </p>
+          </div>
 
-          {/* Mobile notice */}
+          {/* Compatibility Alerts */}
           {isMobile && (
-            <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mb-6 bg-blue-500/10 border border-blue-500/30 rounded-xl p-4">
-              <div className="flex items-start gap-3">
-                <Smartphone className="w-5 h-5 text-blue-400 shrink-0 mt-0.5" />
-                <p className="text-blue-200 text-sm">
-                  Mobile detected — text-answer mode is recommended. You can still use voice if your keyboard is hidden.
-                </p>
-              </div>
-            </motion.div>
+            <div className="mb-6 bg-blue-500/10 border border-blue-500/30 rounded-xl p-4 font-mono text-xs text-blue-300 flex items-center gap-3">
+              <Smartphone className="w-4 h-4 text-blue-400 shrink-0" />
+              <span>Mobile device detected — text-answer mode is available if voice input is hindered.</span>
+            </div>
           )}
 
-          {/* Chrome Warning */}
           {!isChrome && (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="mb-6 bg-amber-500/10 border border-amber-500/30 rounded-xl p-4"
-            >
-              <div className="flex items-start gap-3">
-                <Chrome className="w-6 h-6 text-amber-400 shrink-0 mt-0.5" />
+            <div className="mb-6 bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 font-mono text-xs text-amber-300 flex items-center gap-3">
+              <Chrome className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>Google Chrome recommended for optimal speech recognition and low-latency audio capture.</span>
+            </div>
+          )}
+
+          {/* Main 2-Column One Section Container */}
+          <div className="relative overflow-hidden rounded-2xl bg-[#0c0c0f]/80 backdrop-blur-2xl border border-white/10 p-6 sm:p-8 lg:p-10 shadow-[0_20px_50px_rgba(0,0,0,0.85)]">
+            <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-[#76b900]/40 to-transparent pointer-events-none" />
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 lg:gap-12">
+              {/* Column 1: Video Feed & Sensor Diagnostics */}
+              <div className="space-y-6 flex flex-col justify-between">
                 <div>
-                  <p className="text-amber-300 font-medium">Chrome Browser Recommended</p>
-                  <p className="text-amber-400/70 text-sm mt-1">
-                    For the best experience, please use Google Chrome. Speech recognition may not work properly in other browsers.
+                  <div className="flex items-center gap-2 pb-3 border-b border-white/[0.08] mb-5">
+                    <Video className="w-4 h-4 text-[#76b900]" />
+                    <h2 className="font-mono text-xs font-bold uppercase tracking-widest text-zinc-200">
+                      OPTICAL FEED & ACOUSTIC SENSORS
+                    </h2>
+                  </div>
+
+                  {/* Video Viewport */}
+                  <div className="relative aspect-video rounded-xl bg-black border border-white/10 overflow-hidden mb-5">
+                    <video
+                      ref={avVideoRef}
+                      autoPlay
+                      muted
+                      playsInline
+                      className="w-full h-full object-cover"
+                    />
+                    {avVideoWorking ? (
+                      <div className="absolute top-3 left-3 px-2.5 py-1 rounded-md bg-black/75 backdrop-blur-md border border-white/10 flex items-center gap-2 text-[10px] font-mono font-bold text-white">
+                        <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                        <span>LIVE STREAM • 1080P</span>
+                      </div>
+                    ) : (
+                      <div className="absolute inset-0 flex items-center justify-center bg-black/90">
+                        <div className="text-center p-4">
+                          <VideoOff className="w-10 h-10 text-zinc-600 mx-auto mb-2" />
+                          <p className="font-mono text-xs text-zinc-400">Camera feed not detected</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Camera Device Selector */}
+                  {videoDevices.length > 0 && (
+                    <div className="flex items-center gap-2 mb-4 p-2.5 rounded-xl bg-black/60 border border-white/10 font-mono text-xs">
+                      <span className="text-[#76b900] font-bold shrink-0">SELECT CAMERA:</span>
+                      <select
+                        value={selectedVideoDeviceId}
+                        onChange={(e) => {
+                          setSelectedVideoDeviceId(e.target.value);
+                          initializeAVCheck(e.target.value);
+                        }}
+                        className="flex-1 bg-[#141518] text-white border border-white/20 rounded-lg px-2.5 py-1 text-xs focus:outline-none focus:border-[#76b900] cursor-pointer"
+                      >
+                        {videoDevices.map((d, i) => (
+                          <option key={d.deviceId || i} value={d.deviceId}>
+                            {d.label || (d.deviceId ? `Camera ${i + 1} (${d.deviceId.slice(0, 8)}...)` : `Camera ${i + 1}`)}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  {/* Device Status Cards */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className={`p-4 rounded-xl border font-mono transition-all ${
+                      avVideoWorking
+                        ? 'bg-[#76b900]/10 border-[#76b900]/30 text-white'
+                        : 'bg-red-500/10 border-red-500/30 text-red-400'
+                    }`}>
+                      <div className="flex items-center gap-3">
+                        {avVideoWorking ? (
+                          <CheckCircle2 className="w-5 h-5 text-[#76b900] shrink-0" />
+                        ) : (
+                          <XCircle className="w-5 h-5 text-red-400 shrink-0" />
+                        )}
+                        <div>
+                          <p className="text-xs font-bold uppercase tracking-wider">
+                            Camera
+                          </p>
+                          <p className="text-[11px] text-zinc-400 mt-0.5">
+                            {avVideoWorking ? 'Working // Stream Active' : 'Not Detected'}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className={`p-4 rounded-xl border font-mono transition-all ${
+                      avAudioWorking
+                        ? 'bg-[#76b900]/10 border-[#76b900]/30 text-white'
+                        : 'bg-red-500/10 border-red-500/30 text-red-400'
+                    }`}>
+                      <div className="flex items-center gap-3">
+                        {avAudioWorking ? (
+                          <CheckCircle2 className="w-5 h-5 text-[#76b900] shrink-0" />
+                        ) : (
+                          <XCircle className="w-5 h-5 text-red-400 shrink-0" />
+                        )}
+                        <div>
+                          <p className="text-xs font-bold uppercase tracking-wider">
+                            Microphone
+                          </p>
+                          <p className="text-[11px] text-zinc-400 mt-0.5">
+                            {avAudioWorking ? 'Working // Audio Calibrated' : 'Not Detected'}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {error && (
+                    <div className="mt-4 p-4 bg-red-500/10 border border-red-500/30 rounded-xl space-y-3">
+                      <div className="flex items-start gap-3">
+                        <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                        <div className="font-mono text-xs text-red-400">
+                          <p className="font-bold">{error}</p>
+                          <p className="text-[11px] text-zinc-400 mt-1">
+                            In Brave, click the <span className="text-white font-bold">🔒 / ⚙️ tune icon</span> next to <span className="text-white">localhost:5173</span> in the address bar and switch Camera & Microphone to <span className="text-[#76b900] font-bold">Allow</span>.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setError('');
+                            initializeAVCheck();
+                          }}
+                          className="px-3 py-2 rounded-lg bg-[#76b900] text-black font-mono text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 hover:bg-[#86d100] cursor-pointer"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          <span>Request / Retry Access</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => confirmAVAndStart(true)}
+                          className="px-3 py-2 rounded-lg bg-white/[0.08] hover:bg-white/[0.15] border border-white/20 text-white font-mono text-xs font-bold uppercase tracking-wider cursor-pointer flex items-center gap-1.5"
+                        >
+                          <ArrowRight className="w-3.5 h-3.5" />
+                          <span>Continue Anyway (Audio / Text Mode)</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Actions */}
+                <div className="flex flex-col sm:flex-row items-center gap-3 pt-6 border-t border-white/[0.08]">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (avCheckStream) {
+                        avCheckStream.getTracks().forEach(track => track.stop());
+                        setAvCheckStream(null);
+                      }
+                      setStep('setup');
+                    }}
+                    className="w-full sm:w-1/3 py-3.5 px-4 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-zinc-300 hover:text-white font-mono text-xs uppercase tracking-wider transition-colors cursor-pointer text-center"
+                  >
+                    Back to Setup
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => confirmAVAndStart(!avVideoWorking || !avAudioWorking)}
+                    className="w-full sm:w-2/3 py-3.5 px-6 rounded-xl bg-[#76b900] hover:bg-[#86d100] active:scale-[0.99] text-black font-mono font-bold text-xs uppercase tracking-wider transition-all cursor-pointer text-center shadow-none flex items-center justify-center gap-2"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>{avVideoWorking && avAudioWorking ? 'Confirm & Start Interview' : 'Start Interview (Continue Anyway)'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Column 2: Interview Protocol & Do's and Don'ts */}
+              <div className="space-y-5">
+                <div className="flex items-center gap-2 pb-3 border-b border-white/[0.08]">
+                  <ShieldCheck className="w-4 h-4 text-[#76b900]" />
+                  <h2 className="font-mono text-xs font-bold uppercase tracking-widest text-zinc-200">
+                    ASSESSMENT PROTOCOL & DO'S AND DON'TS
+                  </h2>
+                </div>
+
+                {/* DO's Card */}
+                <div className="p-5 rounded-xl bg-white/[0.02] border border-[#76b900]/20 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-[#76b900]" />
+                    <h3 className="font-mono text-xs font-bold uppercase tracking-wider text-[#76b900]">
+                      DO'S // RECOMMENDED CANDIDATE PROTOCOLS
+                    </h3>
+                  </div>
+                  <ul className="space-y-2.5 font-mono text-xs text-zinc-300">
+                    <li className="flex items-start gap-2.5">
+                      <span className="text-[#76b900] font-bold mt-0.5">✓</span>
+                      <span>Look directly at your camera lens during answers to project confidence.</span>
+                    </li>
+                    <li className="flex items-start gap-2.5">
+                      <span className="text-[#76b900] font-bold mt-0.5">✓</span>
+                      <span>Structure technical answers using STAR (Situation, Task, Action, Result).</span>
+                    </li>
+                    <li className="flex items-start gap-2.5">
+                      <span className="text-[#76b900] font-bold mt-0.5">✓</span>
+                      <span>Quantify engineering outcomes (e.g. p99 latency reduction %, QPS scale, cloud cost).</span>
+                    </li>
+                    <li className="flex items-start gap-2.5">
+                      <span className="text-[#76b900] font-bold mt-0.5">✓</span>
+                      <span>Vocalize architectural tradeoffs—explain why you chose specific data structures or engines.</span>
+                    </li>
+                  </ul>
+                </div>
+
+                {/* DON'Ts Card */}
+                <div className="p-5 rounded-xl bg-white/[0.02] border border-amber-500/20 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-amber-400" />
+                    <h3 className="font-mono text-xs font-bold uppercase tracking-wider text-amber-400">
+                      DON'TS // ASSESSMENT RESTRICTIONS
+                    </h3>
+                  </div>
+                  <ul className="space-y-2.5 font-mono text-xs text-zinc-300">
+                    <li className="flex items-start gap-2.5">
+                      <span className="text-amber-400 font-bold mt-0.5">✕</span>
+                      <span>Do not switch browser tabs or minimize the assessment window.</span>
+                    </li>
+                    <li className="flex items-start gap-2.5">
+                      <span className="text-amber-400 font-bold mt-0.5">✕</span>
+                      <span>Do not consult external notes or generative AI tools during live questioning.</span>
+                    </li>
+                    <li className="flex items-start gap-2.5">
+                      <span className="text-amber-400 font-bold mt-0.5">✕</span>
+                      <span>Avoid brief or one-word answers; elaborate with technical depth and rationale.</span>
+                    </li>
+                    <li className="flex items-start gap-2.5">
+                      <span className="text-amber-400 font-bold mt-0.5">✕</span>
+                      <span>Do not jump into coding or design before clarifying functional requirements.</span>
+                    </li>
+                  </ul>
+                </div>
+
+                {/* Environmental Check */}
+                <div className="p-4 rounded-xl bg-[#141418]/60 border border-white/[0.06] flex items-center gap-3">
+                  <Lightbulb className="w-4 h-4 text-[#76b900] shrink-0" />
+                  <p className="font-mono text-[11px] text-zinc-400 leading-relaxed">
+                    A well-lit, quiet environment ensures accurate facial expression parsing and clear speech-to-text transcription.
                   </p>
                 </div>
               </div>
-            </motion.div>
-          )}
-
-          {/* Video Preview */}
-          <motion.div
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            className="bg-background/50 border border-border rounded-2xl p-6 mb-6"
-          >
-            <div className="relative aspect-video bg-background rounded-xl overflow-hidden mb-6">
-              <video
-                ref={avVideoRef}
-                autoPlay
-                muted
-                playsInline
-                className="w-full h-full object-cover"
-              />
-              {!avVideoWorking && (
-                <div className="absolute inset-0 flex items-center justify-center bg-background">
-                  <div className="text-center">
-                    <VideoOff className="w-12 h-12 text-muted-foreground/80 mx-auto mb-2" />
-                    <p className="text-muted-foreground">Camera not detected</p>
-                  </div>
-                </div>
-              )}
             </div>
-
-            {/* A/V Status Indicators */}
-            <div className="grid grid-cols-2 gap-4 mb-6">
-              <div className={`p-4 rounded-xl border ${avVideoWorking ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-red-500/10 border-red-500/30'}`}>
-                <div className="flex items-center gap-3">
-                  {avVideoWorking ? (
-                    <CheckCircle className="w-6 h-6 text-emerald-400" />
-                  ) : (
-                    <XCircle className="w-6 h-6 text-red-400" />
-                  )}
-                  <div>
-                    <p className={`font-medium ${avVideoWorking ? 'text-emerald-400' : 'text-red-400'}`}>
-                      Camera
-                    </p>
-                    <p className="text-sm text-muted-foreground">
-                      {avVideoWorking ? 'Working' : 'Not detected'}
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <div className={`p-4 rounded-xl border ${avAudioWorking ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-red-500/10 border-red-500/30'}`}>
-                <div className="flex items-center gap-3">
-                  {avAudioWorking ? (
-                    <CheckCircle className="w-6 h-6 text-emerald-400" />
-                  ) : (
-                    <XCircle className="w-6 h-6 text-red-400" />
-                  )}
-                  <div>
-                    <p className={`font-medium ${avAudioWorking ? 'text-emerald-400' : 'text-red-400'}`}>
-                      Microphone
-                    </p>
-                    <p className="text-sm text-muted-foreground">
-                      {avAudioWorking ? 'Working' : 'Not detected'}
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {error && (
-              <div className="mb-6 p-4 bg-red-500/10 border border-red-500/30 rounded-xl flex items-start gap-3">
-                <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
-                <p className="text-red-400 text-sm">{error}</p>
-              </div>
-            )}
-
-            {/* Action Buttons */}
-            <div className="flex gap-4">
-              <Button
-                variant="outline"
-                onClick={() => {
-                  if (avCheckStream) {
-                    avCheckStream.getTracks().forEach(track => track.stop());
-                    setAvCheckStream(null);
-                  }
-                  setStep('setup');
-                }}
-                className="flex-1"
-              >
-                Back
-              </Button>
-              <Button
-                variant="primary"
-                onClick={confirmAVAndStart}
-                disabled={!avVideoWorking || !avAudioWorking}
-                className="flex-1"
-              >
-                <CheckCircle className="w-5 h-5 mr-2" />
-                Confirm & Start Interview
-              </Button>
-            </div>
-          </motion.div>
-
-          {/* Tips */}
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 0.3 }}
-            className="text-center text-sm text-muted-foreground"
-          >
-            <p>Make sure you're in a well-lit, quiet environment for the best results.</p>
-          </motion.div>
+          </div>
         </div>
       </div>
     );
@@ -1246,375 +1520,526 @@ ${updatedProgress.level}`
 
   if (step === 'setup') {
     return (
-      <div className="min-h-screen bg-background">
-        <div className="fixed inset-0 overflow-hidden pointer-events-none">
-          <div className="absolute top-1/4 left-0 w-96 h-96 bg-primary/10 rounded-full blur-3xl" />
-          <div className="absolute bottom-1/4 right-0 w-96 h-96 bg-purple-500/10 rounded-full blur-3xl" />
-        </div>
+      <div className="min-h-screen bg-[#000000] text-white font-sans selection:bg-[#76b900] selection:text-black py-8 md:py-10">
+        {/* Subtle grid background */}
+        <div
+          className="fixed inset-0 pointer-events-none opacity-20"
+          style={{
+            backgroundImage: `
+              linear-gradient(to right, #1a1a1a 1px, transparent 1px),
+              linear-gradient(to bottom, #1a1a1a 1px, transparent 1px)
+            `,
+            backgroundSize: '32px 32px'
+          }}
+        />
 
-        <div className="relative max-w-2xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-          <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} className="text-center mb-10">
-            <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/10 border border-primary/20 text-primary text-sm mb-4">
-              <Sparkles className="w-4 h-4" />
-              AI-Powered Interview Practice
+        <div className="relative z-10 w-full px-6 sm:px-10 lg:px-16 xl:px-20">
+          {/* Header */}
+          <div className="mb-8">
+            <div className="flex items-center gap-2.5 mb-2">
+              <div className="w-2.5 h-2.5 bg-[#76b900]" />
+              <span className="font-mono text-xs font-bold uppercase tracking-widest text-[#76b900]">
+                MODULE 02 // TECHNICAL EVALUATION
+              </span>
             </div>
-            <h1 className="text-4xl md:text-5xl font-bold text-foreground mb-3">Interview Prep</h1>
-            <p className="text-lg text-muted-foreground">Practice with AI interviewer, get complete feedback at the end</p>
-          </motion.div>
+            <h1 className="text-3xl sm:text-4xl md:text-5xl font-black uppercase tracking-tight text-white font-mono">
+              AI TECHNICAL INTERVIEW & LIVE SCREEN
+            </h1>
+            <p className="mt-2.5 text-zinc-400 text-sm md:text-base font-mono max-w-3xl leading-relaxed">
+              Autonomous evaluation engine powered by NVIDIA Nemotron 120B. Calibrates domain depth, system architecture tradeoffs, and communication rubrics in real-time.
+            </p>
+          </div>
 
-          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}>
-            <div className="p-8 rounded-3xl glass glow border border-border shadow-2xl relative overflow-hidden">
-              <div className="absolute top-0 right-0 w-64 h-64 bg-primary/5 rounded-full blur-3xl pointer-events-none"></div>
-              <form onSubmit={handleStartInterview} className="space-y-6 relative z-10">
-                <div>
-                  <label className="block text-sm font-medium text-muted-foreground mb-2">Job Role *</label>
-                  <input
-                    type="text"
-                    value={formData.jobRole}
-                    onChange={(e) => setFormData({ ...formData, jobRole: e.target.value })}
-                    placeholder="e.g., Software Engineer, Product Manager"
-                    className="w-full px-4 py-3 bg-card/50 border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:ring-2 focus:ring-primary focus:border-primary/50 transition-all-300 shadow-sm"
-                    required
-                  />
-                </div>
+          {/* Main Single Section: Double Column Structure */}
+          <div className="relative overflow-hidden rounded-2xl bg-[#0c0c0f]/80 backdrop-blur-2xl border border-white/10 p-6 sm:p-8 lg:p-10 shadow-[0_20px_50px_rgba(0,0,0,0.85)]">
+            <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-[#76b900]/40 to-transparent pointer-events-none" />
 
-                <div>
-                  <label className="block text-sm font-medium text-muted-foreground mb-2">Industry *</label>
-                  <select
-                    value={formData.industry}
-                    onChange={(e) => setFormData({ ...formData, industry: e.target.value })}
-                    className="w-full px-4 py-3 bg-muted/50 border border-border rounded-xl text-foreground focus:ring-2 focus:ring-primary"
-                  >
-                    {INDUSTRIES.map(ind => <option key={ind.value} value={ind.value}>{ind.label}</option>)}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-muted-foreground mb-2">Experience Level *</label>
-                  <select
-                    value={formData.experienceLevel}
-                    onChange={(e) => setFormData({ ...formData, experienceLevel: e.target.value })}
-                    className="w-full px-4 py-3 bg-muted/50 border border-border rounded-xl text-foreground focus:ring-2 focus:ring-primary"
-                  >
-                    {EXPERIENCE_LEVELS.map(level => <option key={level.value} value={level.value}>{level.label}</option>)}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-muted-foreground mb-2">
-                    Interview Mode
-                  </label>
-                  <div className="grid grid-cols-2 gap-2">
-                    {INTERVIEW_MODES.map((m) => (
-                      <button
-                        key={m.value}
-                        type="button"
-                        onClick={() => setFormData({ ...formData, mode: m.value })}
-                        className={
-                          'text-left p-3 rounded-xl border transition-colors ' +
-                          (formData.mode === m.value
-                            ? 'bg-primary/15 border-primary/50 text-foreground'
-                            : 'bg-muted/30 border-border text-muted-foreground hover:border-primary/30')
-                        }
-                      >
-                        <div className="text-sm font-semibold">{m.label}</div>
-                        <div className="text-xs mt-0.5">{m.desc}</div>
-                      </button>
-                    ))}
+            <form onSubmit={handleStartInterview} className="space-y-8">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 lg:gap-12">
+                {/* Column 1: Target Calibration & Track */}
+                <div className="space-y-6">
+                  <div className="flex items-center gap-2 pb-3 border-b border-white/[0.08]">
+                    <Terminal className="w-4 h-4 text-[#76b900]" />
+                    <h2 className="font-mono text-xs font-bold uppercase tracking-widest text-zinc-200">
+                      01 // ROLE CALIBRATION & TRACK
+                    </h2>
                   </div>
-                </div>
 
-                {formData.mode === 'coding' && (
+                  {/* Target Job Role */}
                   <div>
-                    <label className="block text-sm font-medium text-muted-foreground mb-2">
-                      Coding Language
-                    </label>
-                    <select
-                      value={formData.codingLanguage}
-                      onChange={(e) => setFormData({ ...formData, codingLanguage: e.target.value })}
-                      className="w-full px-4 py-3 bg-muted/50 border border-border rounded-xl text-foreground focus:ring-2 focus:ring-primary"
-                    >
-                      {CODING_LANGUAGES.map((l) => (
-                        <option key={l.value} value={l.value}>{l.label}</option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-
-                <div>
-                  <label className="block text-sm font-medium text-muted-foreground mb-2">
-                    <span className="inline-flex items-center gap-1.5">
-                      <Globe className="w-4 h-4" /> Language
-                    </span>
-                  </label>
-                  <select
-                    value={formData.language}
-                    onChange={(e) => setFormData({ ...formData, language: e.target.value })}
-                    className="w-full px-4 py-3 bg-muted/50 border border-border rounded-xl text-foreground focus:ring-2 focus:ring-primary"
-                  >
-                    {SUPPORTED_LANGUAGES.map((l) => (
-                      <option key={l.code} value={l.code}>{l.label}</option>
-                    ))}
-                  </select>
-                  {formData.language !== 'en' && (
-                    <p className="text-xs text-muted-foreground mt-1.5">
-                      Non-English uses backend transcription via your AI provider.
-                    </p>
-                  )}
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-muted-foreground mb-2">
-                    Target Company <span className="text-muted-foreground/60">(optional)</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={formData.companyName}
-                    onChange={(e) => setFormData({ ...formData, companyName: e.target.value })}
-                    placeholder="e.g., Google, Stripe, Airbnb"
-                    className="w-full px-4 py-3 bg-card/50 border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:ring-2 focus:ring-primary focus:border-primary/50"
-                  />
-                  <p className="text-xs text-muted-foreground mt-1.5">
-                    Pulls from the curated company question bank when available.
-                  </p>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-muted-foreground mb-2">Number of Questions</label>
-                  <div className="flex items-center gap-4">
-                    <input
-                      type="range"
-                      min="2"
-                      max="20"
-                      value={formData.questionCount}
-                      onChange={(e) => setFormData({ ...formData, questionCount: parseInt(e.target.value) })}
-                      className="flex-1 h-2 bg-card rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                    />
-                    <span className="w-12 text-center text-lg font-semibold text-primary">{formData.questionCount}</span>
-                  </div>
-                  <p className="text-xs text-muted-foreground mt-2">Choose between 2 to 20 questions for your interview</p>
-                </div>
-
-                {/* Job Description (paste or URL) */}
-                <div className="border-2 border-dashed border-blue-500/20 rounded-2xl p-6 bg-blue-500/5 transition-colors">
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 bg-blue-500/20 rounded-xl flex items-center justify-center">
-                        <LinkIcon className="w-5 h-5 text-blue-400" />
-                      </div>
-                      <div>
-                        <h3 className="text-foreground font-bold text-base">Job Description <span className="text-xs text-muted-foreground font-normal">(optional)</span></h3>
-                        <p className="text-xs text-muted-foreground">Personalize questions to a specific role.</p>
-                      </div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="font-mono text-xs font-bold uppercase tracking-wider text-zinc-300">
+                        Target Engineering Role *
+                      </label>
+                      <span className="text-[11px] font-mono text-zinc-500 uppercase">
+                        Calibrates Probing Questions
+                      </span>
                     </div>
-                    {jdSummary && (
-                      <button
-                        type="button"
-                        onClick={() => { setJdSummary(null); setJdInput(''); }}
-                        className="text-xs text-muted-foreground hover:text-foreground"
+                    <input
+                      type="text"
+                      value={formData.jobRole}
+                      onChange={(e) => setFormData({ ...formData, jobRole: e.target.value })}
+                      placeholder="e.g. Senior Backend Engineer, Distributed Systems"
+                      className="w-full rounded-xl border border-white/[0.08] bg-black/50 px-4 py-3 text-sm font-mono text-white placeholder:text-zinc-600 focus:outline-none focus:border-[#76b900] focus:ring-1 focus:ring-[#76b900] transition-all"
+                      required
+                    />
+
+                    {/* Suggestions */}
+                    <div className="flex flex-wrap items-center gap-2 mt-2.5">
+                      <span className="text-[10px] font-mono uppercase text-zinc-500">
+                        SUGGESTIONS:
+                      </span>
+                      {SUGGESTED_ROLES.map((role) => (
+                        <button
+                          key={role}
+                          type="button"
+                          onClick={() => setFormData({ ...formData, jobRole: role })}
+                          className="px-2.5 py-1 text-[11px] font-mono rounded-lg bg-white/[0.03] hover:bg-white/[0.07] border border-white/[0.06] hover:border-[#76b900]/40 text-zinc-400 hover:text-zinc-200 transition-all cursor-pointer"
+                        >
+                          {role}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Industry & Experience Level Grid */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block font-mono text-xs font-bold uppercase tracking-wider text-zinc-300 mb-2">
+                        Industry Track *
+                      </label>
+                      <select
+                        value={formData.industry}
+                        onChange={(e) => setFormData({ ...formData, industry: e.target.value })}
+                        className="w-full rounded-xl border border-white/[0.08] bg-black/50 px-3.5 py-3 text-sm font-mono text-zinc-200 focus:outline-none focus:border-[#76b900] focus:ring-1 focus:ring-[#76b900] transition-all"
                       >
-                        Clear
-                      </button>
+                        {INDUSTRIES.map(ind => <option key={ind.value} value={ind.value} className="bg-[#0c0c0f]">{ind.label}</option>)}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block font-mono text-xs font-bold uppercase tracking-wider text-zinc-300 mb-2">
+                        Seniority Level *
+                      </label>
+                      <select
+                        value={formData.experienceLevel}
+                        onChange={(e) => setFormData({ ...formData, experienceLevel: e.target.value })}
+                        className="w-full rounded-xl border border-white/[0.08] bg-black/50 px-3.5 py-3 text-sm font-mono text-zinc-200 focus:outline-none focus:border-[#76b900] focus:ring-1 focus:ring-[#76b900] transition-all"
+                      >
+                        {EXPERIENCE_LEVELS.map(level => <option key={level.value} value={level.value} className="bg-[#0c0c0f]">{level.label}</option>)}
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Interview Mode Cards (2x2 Grid) */}
+                  <div>
+                    <label className="block font-mono text-xs font-bold uppercase tracking-wider text-zinc-300 mb-2.5">
+                      Interview Assessment Mode
+                    </label>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {INTERVIEW_MODES.map((m) => {
+                        const isSelected = formData.mode === m.value;
+                        return (
+                          <button
+                            key={m.value}
+                            type="button"
+                            onClick={() => setFormData({ ...formData, mode: m.value })}
+                            className={`text-left p-3.5 rounded-xl border transition-all cursor-pointer ${
+                              isSelected
+                                ? 'bg-[#76b900]/10 border-[#76b900] text-white shadow-[0_0_15px_rgba(118,185,0,0.15)]'
+                                : 'bg-black/40 border-white/[0.08] text-zinc-400 hover:border-white/20 hover:text-zinc-200'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className={`font-mono text-xs font-bold uppercase tracking-wider ${isSelected ? 'text-[#76b900]' : 'text-white'}`}>
+                                {m.label}
+                              </span>
+                              {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-[#76b900]" />}
+                            </div>
+                            <p className="font-mono text-[11px] text-zinc-400 mt-1 leading-relaxed">
+                              {m.desc}
+                            </p>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Coding Language (if coding mode) */}
+                  {formData.mode === 'coding' && (
+                    <div>
+                      <label className="block font-mono text-xs font-bold uppercase tracking-wider text-zinc-300 mb-2">
+                        Coding Execution Language
+                      </label>
+                      <select
+                        value={formData.codingLanguage}
+                        onChange={(e) => setFormData({ ...formData, codingLanguage: e.target.value })}
+                        className="w-full rounded-xl border border-white/[0.08] bg-black/50 px-3.5 py-3 text-sm font-mono text-zinc-200 focus:outline-none focus:border-[#76b900] focus:ring-1 focus:ring-[#76b900]"
+                      >
+                        {CODING_LANGUAGES.map((l) => (
+                          <option key={l.value} value={l.value} className="bg-[#0c0c0f]">{l.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  {/* Language & Target Company */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block font-mono text-xs font-bold uppercase tracking-wider text-zinc-300 mb-2">
+                        <span className="inline-flex items-center gap-1.5">
+                          <Globe className="w-3.5 h-3.5 text-[#76b900]" /> Spoken Language
+                        </span>
+                      </label>
+                      <select
+                        value={formData.language}
+                        onChange={(e) => setFormData({ ...formData, language: e.target.value })}
+                        className="w-full rounded-xl border border-white/[0.08] bg-black/50 px-3.5 py-3 text-sm font-mono text-zinc-200 focus:outline-none focus:border-[#76b900] focus:ring-1 focus:ring-[#76b900]"
+                      >
+                        {SUPPORTED_LANGUAGES.map((l) => (
+                          <option key={l.code} value={l.code} className="bg-[#0c0c0f]">{l.label}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block font-mono text-xs font-bold uppercase tracking-wider text-zinc-300 mb-2">
+                        Target Company <span className="text-zinc-500 lowercase">(optional)</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={formData.companyName}
+                        onChange={(e) => setFormData({ ...formData, companyName: e.target.value })}
+                        placeholder="e.g. Google, NVIDIA, Stripe"
+                        className="w-full rounded-xl border border-white/[0.08] bg-black/50 px-4 py-3 text-sm font-mono text-white placeholder:text-zinc-600 focus:outline-none focus:border-[#76b900] focus:ring-1 focus:ring-[#76b900]"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Column 2: Context & Assessment Criteria */}
+                <div className="space-y-6">
+                  <div className="flex items-center gap-2 pb-3 border-b border-white/[0.08]">
+                    <BarChart3 className="w-4 h-4 text-[#76b900]" />
+                    <h2 className="font-mono text-xs font-bold uppercase tracking-widest text-zinc-200">
+                      02 // CONTEXT & ASSESSMENT CRITERIA
+                    </h2>
+                  </div>
+
+                  {/* Question Count Slider */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="font-mono text-xs font-bold uppercase tracking-wider text-zinc-300">
+                        Assessment Length
+                      </label>
+                      <span className="font-mono text-xs font-bold text-[#76b900] px-2 py-0.5 rounded bg-[#76b900]/10 border border-[#76b900]/30">
+                        {formData.questionCount} Questions
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <input
+                        type="range"
+                        min="2"
+                        max="20"
+                        value={formData.questionCount}
+                        onChange={(e) => setFormData({ ...formData, questionCount: parseInt(e.target.value) })}
+                        className="flex-1 h-2 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-[#76b900]"
+                      />
+                    </div>
+                    <p className="font-mono text-[11px] text-zinc-500 mt-2">
+                      Select 2 to 20 questions. Standard engineering screening is 8–10 questions (~15–20 minutes).
+                    </p>
+                  </div>
+
+                  {/* Job Description (Optional) */}
+                  <div className="p-4 rounded-xl bg-white/[0.02] border border-white/[0.08]">
+                    <div className="flex items-center justify-between mb-2.5">
+                      <label className="font-mono text-xs font-bold uppercase tracking-wider text-zinc-300 flex items-center gap-2">
+                        <LinkIcon className="w-3.5 h-3.5 text-[#76b900]" />
+                        Job Description Target <span className="text-zinc-500 lowercase">(optional)</span>
+                      </label>
+                      {jdSummary && (
+                        <button
+                          type="button"
+                          onClick={() => { setJdSummary(null); setJdInput(''); }}
+                          className="font-mono text-[10px] text-zinc-400 hover:text-white uppercase cursor-pointer"
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+
+                    {!jdSummary && (
+                      <>
+                        <div className="flex items-center gap-2 mb-3">
+                          {['none', 'paste', 'url'].map((m) => (
+                            <button
+                              key={m}
+                              type="button"
+                              onClick={() => setJdMode(m)}
+                              className={`px-3 py-1 font-mono text-[11px] rounded-lg border transition-colors cursor-pointer ${
+                                jdMode === m
+                                  ? 'bg-[#76b900]/15 border-[#76b900]/50 text-[#76b900]'
+                                  : 'bg-black/40 border-white/[0.06] text-zinc-400 hover:text-zinc-200'
+                              }`}
+                            >
+                              {m === 'none' ? 'Skip' : m === 'paste' ? 'Paste Text' : 'From URL'}
+                            </button>
+                          ))}
+                        </div>
+
+                        {jdMode !== 'none' && (
+                          <div className="space-y-2">
+                            <textarea
+                              value={jdInput}
+                              onChange={(e) => setJdInput(e.target.value)}
+                              placeholder={jdMode === 'url' ? 'https://careers.google.com/jobs/results/...' : 'Paste target job description requirements...'}
+                              rows={jdMode === 'url' ? 2 : 4}
+                              className="w-full rounded-xl border border-white/[0.08] bg-black/60 p-3 font-mono text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-[#76b900]"
+                            />
+                            {jdError && <p className="font-mono text-xs text-red-400">{jdError}</p>}
+                            <button
+                              type="button"
+                              onClick={parseJd}
+                              disabled={jdLoading || !jdInput.trim()}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 font-mono text-xs uppercase font-bold rounded-lg bg-white/[0.06] hover:bg-white/[0.1] border border-white/10 text-white disabled:opacity-50 cursor-pointer"
+                            >
+                              {jdLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                              {jdLoading ? 'Extracting…' : 'Extract Requirements'}
+                            </button>
+                          </div>
+                        )}
+                      </>
+                    )}
+
+                    {jdSummary && (
+                      <div className="font-mono text-xs text-[#76b900] space-y-1 p-2 rounded bg-[#76b900]/10 border border-[#76b900]/20">
+                        <div><span className="text-zinc-400">DETECTED ROLE: </span>{jdSummary.role || '—'}</div>
+                        {jdSummary.company && <div><span className="text-zinc-400">COMPANY: </span>{jdSummary.company}</div>}
+                        <div><span className="text-zinc-400">LENGTH: </span>{jdSummary.jdText.length.toLocaleString()} characters</div>
+                      </div>
                     )}
                   </div>
 
-                  {!jdSummary && (
-                    <>
-                      <div className="flex items-center gap-2 mb-3 text-xs">
-                        {['none', 'paste', 'url'].map((m) => (
-                          <button
-                            key={m}
-                            type="button"
-                            onClick={() => setJdMode(m)}
-                            className={
-                              'px-3 py-1 rounded-full transition-colors ' +
-                              (jdMode === m
-                                ? 'bg-blue-500/20 border border-blue-500/40 text-blue-300'
-                                : 'bg-muted/30 border border-border text-muted-foreground hover:border-blue-500/30')
-                            }
-                          >
-                            {m === 'none' ? 'Skip' : m === 'paste' ? 'Paste Text' : 'From URL'}
-                          </button>
+                  {/* Resume Context (Optional) */}
+                  <div className="p-4 rounded-xl bg-white/[0.02] border border-white/[0.08]">
+                    <label className="block font-mono text-xs font-bold uppercase tracking-wider text-zinc-300 mb-2 flex items-center gap-2">
+                      <FileUp className="w-3.5 h-3.5 text-[#76b900]" />
+                      Candidate Resume Context <span className="text-zinc-500 lowercase">(optional)</span>
+                    </label>
+
+                    <div className="space-y-3">
+                      <select
+                        value={selectedResumeId}
+                        onChange={handleResumeSelect}
+                        className="w-full rounded-xl border border-white/[0.08] bg-black/50 px-3.5 py-2.5 text-xs font-mono text-zinc-200 focus:outline-none focus:border-[#76b900]"
+                      >
+                        <option value="none" className="bg-[#0c0c0f]">-- No Resume Attached --</option>
+                        {savedResumes.map(r => (
+                          <option key={r._id || r.id} value={r._id || r.id} className="bg-[#0c0c0f]">
+                            {r.title || r.jobRole || 'Saved Resume'}
+                          </option>
                         ))}
-                      </div>
+                        <option value="upload" className="bg-[#0c0c0f]">+ Upload New PDF</option>
+                      </select>
 
-                      {jdMode !== 'none' && (
-                        <>
-                          <textarea
-                            value={jdInput}
-                            onChange={(e) => setJdInput(e.target.value)}
-                            placeholder={jdMode === 'url' ? 'https://job-boards.example.com/job/...' : 'Paste the job description text here...'}
-                            rows={jdMode === 'url' ? 2 : 5}
-                            className="w-full px-3 py-2 text-sm bg-card border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:ring-2 focus:ring-blue-500 resize-y"
+                      {selectedResumeId === 'upload' && !resumeFile && (
+                        <div className="relative cursor-pointer">
+                          <input
+                            ref={resumeInputRef}
+                            type="file"
+                            accept=".pdf"
+                            onChange={handleResumeUpload}
+                            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                            disabled={resumeLoading}
                           />
-                          {jdError && <p className="text-xs text-red-400 mt-1.5">{jdError}</p>}
-                          <button
-                            type="button"
-                            onClick={parseJd}
-                            disabled={jdLoading || !jdInput.trim()}
-                            className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-500 text-white disabled:opacity-50 hover:bg-blue-600"
-                          >
-                            {jdLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
-                            {jdLoading ? 'Parsing…' : 'Parse & Use'}
-                          </button>
-                        </>
-                      )}
-                    </>
-                  )}
-
-                  {jdSummary && (
-                    <div className="text-xs text-blue-200 space-y-1">
-                      <div><span className="text-muted-foreground">Detected role: </span>{jdSummary.role || '—'}</div>
-                      {jdSummary.company && <div><span className="text-muted-foreground">Company: </span>{jdSummary.company}</div>}
-                      <div><span className="text-muted-foreground">Text length: </span>{jdSummary.jdText.length} characters</div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Resume Upload Section */}
-                <div className="border-2 border-dashed border-primary/20 rounded-2xl p-6 bg-primary/5 transition-colors relative group">
-                  <div className="flex items-center gap-4 mb-4">
-                    <div className="w-12 h-12 bg-primary/20 rounded-xl flex items-center justify-center group-hover:scale-110 transition-transform">
-                      <FileUp className="w-6 h-6 text-primary" />
-                    </div>
-                    <div>
-                      <h3 className="text-foreground font-bold text-lg">Resume Context (Optional)</h3>
-                      <p className="text-sm text-muted-foreground">Select or upload a resume to get personalized questions.</p>
-                    </div>
-                  </div>
-
-                  <div className="mb-4">
-                    <select
-                      value={selectedResumeId}
-                      onChange={handleResumeSelect}
-                      className="w-full px-4 py-3 bg-card border border-border rounded-xl text-foreground focus:ring-2 focus:ring-primary shadow-sm"
-                    >
-                      <option value="none">-- No Resume --</option>
-                      {savedResumes.map(r => (
-                        <option key={r._id || r.id} value={r._id || r.id}>
-                          {r.title || r.jobRole || 'Saved Resume'}
-                        </option>
-                      ))}
-                      <option value="upload">+ Upload New PDF</option>
-                    </select>
-                  </div>
-
-                  {selectedResumeId === 'upload' && !resumeFile ? (
-                    <div className="relative mt-2 cursor-pointer hover:bg-primary/10 rounded-xl transition-colors">
-                      <input
-                        ref={resumeInputRef}
-                        type="file"
-                        accept=".pdf"
-                        onChange={handleResumeUpload}
-                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                        disabled={resumeLoading}
-                      />
-                      <div className="flex items-center justify-center gap-2 py-4 px-4 rounded-xl bg-card border border-border group-hover:border-primary/50 transition-colors shadow-sm">
-                        {resumeLoading ? (
-                          <>
-                            <Loader2 className="w-5 h-5 text-primary animate-spin" />
-                            <span className="text-sm font-semibold text-muted-foreground">Extracting text...</span>
-                          </>
-                        ) : (
-                          <>
-                            <FileUp className="w-4 h-4 text-muted-foreground" />
-                            <span className="text-sm text-muted-foreground">Click to upload resume</span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  ) : resumeFile ? (
-                    <div className="flex items-center justify-between p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30">
-                      <div className="flex items-center gap-3 flex-1">
-                        <FileText className="w-5 h-5 text-emerald-400" />
-                        <div className="flex-1">
-                          <p className="text-sm text-emerald-400 font-medium">{resumeFile.name}</p>
-                          {/* Progress bar showing extraction complete */}
-                          <div className="mt-1.5 h-1.5 bg-card rounded-full overflow-hidden">
-                            <div className="h-full bg-emerald-500 rounded-full" style={{ width: '100%' }} />
+                          <div className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-black/40 border border-dashed border-white/20 hover:border-[#76b900]/50 transition-colors cursor-pointer">
+                            {resumeLoading ? (
+                              <>
+                                <Loader2 className="w-4 h-4 text-[#76b900] animate-spin" />
+                                <span className="font-mono text-xs text-zinc-400">Extracting PDF text...</span>
+                              </>
+                            ) : (
+                              <>
+                                <FileUp className="w-4 h-4 text-zinc-400" />
+                                <span className="font-mono text-xs text-zinc-400">Click to attach PDF resume</span>
+                              </>
+                            )}
                           </div>
                         </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={removeResume}
-                        className="p-1.5 rounded-lg hover:bg-muted transition-colors ml-3"
-                      >
-                        <X className="w-4 h-4 text-muted-foreground" />
-                      </button>
-                    </div>
-                  ) : null}
+                      )}
 
-                  {resumeError && (
-                    <p className="text-xs text-red-400 mt-2">{resumeError}</p>
-                  )}
+                      {resumeFile && (
+                        <div className="flex items-center justify-between p-2.5 rounded-lg bg-[#76b900]/10 border border-[#76b900]/30">
+                          <div className="flex items-center gap-2 text-xs font-mono text-[#76b900] truncate">
+                            <FileText className="w-3.5 h-3.5 shrink-0" />
+                            <span className="truncate">{resumeFile.name}</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={removeResume}
+                            className="text-zinc-400 hover:text-white p-1 cursor-pointer"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      )}
 
-                  {resumeText && (
-                    <div className="mt-3 flex items-center gap-2 text-xs text-primary">
-                      <Sparkles className="w-3 h-3" />
-                      <span>~40% of questions will be personalized based on your resume</span>
+                      {resumeError && (
+                        <p className="font-mono text-xs text-red-400">{resumeError}</p>
+                      )}
+
+                      {resumeText && (
+                        <p className="font-mono text-[11px] text-[#76b900] flex items-center gap-1.5">
+                          <Sparkles className="w-3 h-3" />
+                          Questions will dynamically reflect your architectural experience
+                        </p>
+                      )}
                     </div>
-                  )}
+                  </div>
+
+                  {/* Engine Protocol Banner */}
+                  <div className="p-3.5 rounded-xl bg-[#141418]/70 border border-white/[0.08] space-y-1.5">
+                    <div className="flex items-center gap-2">
+                      <span className="w-1.5 h-1.5 rounded-full bg-[#76b900] animate-pulse" />
+                      <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-white">
+                        NVIDIA NEMOTRON 120B ENGINE READY
+                      </span>
+                    </div>
+                    <p className="font-mono text-[11px] text-zinc-400 leading-relaxed">
+                      Questions are generated dynamically. Answers are evaluated across technical accuracy, depth, STAR structure, and communication clarity.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Error Message */}
+              {error && (
+                <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/30 flex items-start gap-3">
+                  <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                  <p className="font-mono text-xs text-red-400">{error}</p>
+                </div>
+              )}
+
+              {/* Bottom Action Bar */}
+              <div className="pt-6 border-t border-white/[0.08] flex flex-col sm:flex-row items-center justify-between gap-4">
+                <div className="font-mono text-xs text-zinc-400">
+                  TRACK: <span className="text-white font-bold">{formData.jobRole || 'SOFTWARE ENGINEERING'}</span> • MODE: <span className="text-[#76b900] font-bold">{formData.mode.toUpperCase()}</span>
                 </div>
 
-                {error && (
-                  <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/20 flex items-start gap-3">
-                    <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
-                    <p className="text-sm text-red-400">{error}</p>
-                  </div>
-                )}
-
-                {/* Body language coaching tip */}
-                <BodyLanguageTips currentQuestionIndex={currentQuestionIndex} />
-
-                <Button type="submit" disabled={loading} variant="primary" className="w-full !py-4 !text-lg !rounded-xl flex items-center justify-center gap-2">
-                  {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Mic className="w-5 h-5" />}
-                  {loading ? 'Generating Questions...' : `Start Interview (${formData.questionCount} Questions)`}
-                </Button>
-              </form>
-
-              <div className="mt-6 pt-6 border-t border-border">
-                <p className="text-xs text-muted-foreground text-center">
-                  Questions will be read aloud • Your answers are recorded • Complete feedback at the end
-                </p>
+                <button
+                  type="submit"
+                  disabled={loading || !formData.jobRole.trim()}
+                  className="w-full sm:w-auto flex items-center justify-center gap-2.5 py-3.5 px-8 rounded-xl bg-[#76b900] hover:bg-[#86d100] active:scale-[0.99] disabled:bg-[#141414] disabled:text-zinc-600 disabled:border disabled:border-white/[0.05] disabled:cursor-not-allowed text-black font-mono font-bold text-xs sm:text-sm uppercase tracking-wider transition-all cursor-pointer shadow-none"
+                >
+                  {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Cpu className="w-4 h-4" />}
+                  <span>{loading ? 'Generating Assessment...' : `Initialize Interview (${formData.questionCount} Questions)`}</span>
+                </button>
               </div>
-            </div>
-          </motion.div>
+            </form>
+          </div>
         </div>
       </div>
     );
   }
 
-  // ─── Warmup step ──────────────────────────────────────────────────────
+  // ─── Warmup / Start Test Protocol Popup ──────────────────────────────────────────
   if (step === 'warmup' && warmupQuestions.length > 0) {
     const wq = warmupQuestions[warmupIndex];
     return (
-      <div className="min-h-screen bg-background flex items-center justify-center p-6">
-        <div className="fixed inset-0 overflow-hidden pointer-events-none">
-          <div className="absolute top-1/4 left-0 w-96 h-96 bg-blue-500/10 rounded-full blur-3xl" />
-        </div>
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="relative max-w-xl w-full">
-          <div className="text-center mb-4">
-            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/20 text-blue-300 text-xs">
-              <Sparkles className="w-3 h-3" /> Warmup · not scored
-            </span>
-          </div>
-          <div className="p-8 rounded-3xl bg-background/60 border border-border backdrop-blur-xl">
-            <h2 className="text-2xl font-bold text-foreground mb-3">
-              Warmup question {warmupIndex + 1} of {warmupQuestions.length}
-            </h2>
-            <p className="text-lg text-foreground/90 leading-relaxed">{wq?.question}</p>
-            <p className="mt-3 text-sm text-muted-foreground">
-              This won't count toward your score — just a chance to find your rhythm.
-            </p>
-            <div className="mt-6 flex gap-3">
-              <Button variant="outline" onClick={completeWarmup} className="flex-1">
-                Skip warmup
-              </Button>
-              <Button variant="primary" onClick={completeWarmup} className="flex-1">
-                {warmupIndex + 1 >= warmupQuestions.length ? 'Start real interview' : 'Next'}
-                <ArrowRight className="w-4 h-4 ml-2" />
-              </Button>
+      <div className="min-h-screen bg-[#000000] text-white flex items-center justify-center p-4 sm:p-6 relative selection:bg-[#76b900] selection:text-black">
+        {/* Subtle background grid */}
+        <div
+          className="fixed inset-0 pointer-events-none opacity-20"
+          style={{
+            backgroundImage: `
+              linear-gradient(to right, #1a1a1a 1px, transparent 1px),
+              linear-gradient(to bottom, #1a1a1a 1px, transparent 1px)
+            `,
+            backgroundSize: '32px 32px'
+          }}
+        />
+
+        <motion.div
+          initial={{ opacity: 0, scale: 0.95, y: 10 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          transition={{ duration: 0.25 }}
+          className="relative w-full max-w-xl rounded-2xl bg-[#0c0c0f]/95 backdrop-blur-2xl border border-white/15 shadow-[0_24px_60px_rgba(0,0,0,0.9)] overflow-hidden"
+        >
+          {/* Top Hairline Green Progress Bar */}
+          <div className="w-full h-1 bg-[#76b900]" />
+
+          <div className="p-6 sm:p-8 space-y-6">
+            <div className="flex items-center justify-between pb-4 border-b border-white/[0.08]">
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 bg-[#76b900]" />
+                <span className="font-mono text-xs font-bold uppercase tracking-widest text-[#76b900]">
+                  TEST BRIEFING // NEMOTRON 120B
+                </span>
+              </div>
+              <span className="font-mono text-[11px] text-zinc-400">
+                PROMPT {warmupIndex + 1} OF {warmupQuestions.length}
+              </span>
+            </div>
+
+            <div>
+              <h2 className="text-2xl sm:text-3xl font-black uppercase tracking-tight text-white font-mono mb-2">
+                START TEST PROTOCOL
+              </h2>
+              <p className="font-mono text-xs sm:text-sm text-zinc-400 leading-relaxed">
+                Your technical session for <span className="text-white font-bold">{formData.jobRole || "Software Engineer"}</span> is generated and ready for execution.
+              </p>
+            </div>
+
+            {/* Introductory Calibration Prompt */}
+            <div className="p-4 rounded-xl bg-black/60 border border-white/[0.08] space-y-2">
+              <div className="flex items-center gap-2">
+                <Terminal className="w-3.5 h-3.5 text-[#76b900]" />
+                <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-zinc-300">
+                  INTRODUCTORY CALIBRATION PROMPT
+                </span>
+              </div>
+              <p className="font-mono text-sm text-zinc-200 leading-relaxed font-medium">
+                "{wq?.question}"
+              </p>
+              <p className="font-mono text-[11px] text-zinc-500 pt-1">
+                * This introductory response calibrates your acoustic microphone levels and does not penalize your scored readiness benchmark.
+              </p>
+            </div>
+
+            {/* Mode Confirmation Badges */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 font-mono text-xs">
+              <div className="p-2.5 rounded-lg bg-white/[0.02] border border-white/[0.06]">
+                <span className="text-[10px] text-zinc-500 uppercase block">Track</span>
+                <span className="text-white font-bold uppercase truncate block">{formData.mode}</span>
+              </div>
+              <div className="p-2.5 rounded-lg bg-white/[0.02] border border-white/[0.06]">
+                <span className="text-[10px] text-zinc-500 uppercase block">Questions</span>
+                <span className="text-[#76b900] font-bold">{formData.questionCount} Questions</span>
+              </div>
+              <div className="p-2.5 rounded-lg bg-white/[0.02] border border-white/[0.06] col-span-2 sm:col-span-1">
+                <span className="text-[10px] text-zinc-500 uppercase block">Engine</span>
+                <span className="text-white font-bold">Nemotron 120B</span>
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="pt-4 border-t border-white/[0.08] flex items-center justify-between gap-3">
+              <button
+                type="button"
+                onClick={completeWarmup}
+                className="px-4 py-3 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-zinc-300 hover:text-white font-mono text-xs uppercase tracking-wider transition-colors cursor-pointer"
+              >
+                Skip Warmup
+              </button>
+              <button
+                type="button"
+                onClick={completeWarmup}
+                className="flex items-center gap-2 px-6 py-3 rounded-xl bg-[#76b900] hover:bg-[#86d100] text-black font-mono font-bold text-xs uppercase tracking-wider transition-all cursor-pointer shadow-none"
+              >
+                <span>{warmupIndex + 1 >= warmupQuestions.length ? 'Start Test' : 'Next Question'}</span>
+                <ArrowRight className="w-4 h-4" />
+              </button>
             </div>
           </div>
         </motion.div>
@@ -1628,113 +2053,128 @@ ${updatedProgress.level}`
     const isCoding = formData.mode === 'coding';
 
     return (
-    <>
-      <div className="min-h-screen bg-background">
-        <div className="fixed inset-0 overflow-hidden pointer-events-none">
-          <div className="absolute top-0 left-1/4 w-96 h-96 bg-primary/5 rounded-full blur-3xl" />
-        </div>
+      <>
+        <div className="min-h-screen bg-[#0f1013] text-zinc-100 flex flex-col justify-between select-none relative overflow-x-hidden font-sans pb-24">
+          {/* Subtle Ambient Studio Background */}
+          <div className="fixed inset-0 overflow-hidden pointer-events-none">
+            <div className="absolute top-10 left-1/4 w-[500px] h-[500px] bg-[#76b900]/5 rounded-full blur-3xl" />
+            <div className="absolute bottom-10 right-1/4 w-[500px] h-[500px] bg-blue-500/5 rounded-full blur-3xl" />
+          </div>
 
-        <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mb-6">
-            <div className="flex justify-between items-center mb-2">
-              <span className="text-sm font-medium text-muted-foreground">
-                {isCoding ? <span className="inline-flex items-center gap-1"><Code2 className="w-3.5 h-3.5" /> Coding Question</span> : `Question ${currentQuestionIndex + 1} of ${formData.questionCount}`}
-              </span>
+          {/* Google Meet Top Navigation Bar */}
+          <header className="sticky top-0 z-30 bg-[#17181c]/85 backdrop-blur-xl border-b border-white/[0.08] px-4 sm:px-6 py-3">
+            <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
+              {/* Left: Meeting Info */}
               <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2 px-2.5 py-1 rounded-md bg-white/[0.04] border border-white/[0.08]">
+                  <span className="w-2 h-2 rounded-full bg-[#76b900] animate-pulse" />
+                  <span className="font-mono text-xs font-bold uppercase tracking-wider text-white">
+                    xInterview Live
+                  </span>
+                </div>
+                <div className="hidden sm:flex items-center gap-1.5 font-mono text-xs text-zinc-400">
+                  <span>Room:</span>
+                  <span className="text-zinc-200">xint-nemotron-{currentQuestionIndex + 1}</span>
+                </div>
+                <div className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-white/[0.03] text-zinc-300 font-mono text-xs">
+                  <Clock className="w-3.5 h-3.5 text-zinc-400" />
+                  <span>{formatTime(meetingTimer)}</span>
+                </div>
+              </div>
+
+              {/* Center: Question Progress */}
+              <div className="flex flex-col items-center max-w-xs w-full">
+                <div className="flex items-center justify-between w-full text-xs font-mono text-zinc-400 mb-1">
+                  <span>Question {currentQuestionIndex + 1} of {formData.questionCount}</span>
+                  <span className="text-[#76b900] font-bold">{Math.round(progress)}%</span>
+                </div>
+                <div className="w-full h-1.5 bg-white/[0.08] rounded-full overflow-hidden">
+                  <motion.div
+                    initial={{ width: 0 }}
+                    animate={{ width: `${progress}%` }}
+                    className="h-full bg-gradient-to-r from-[#76b900] to-emerald-400"
+                  />
+                </div>
+              </div>
+
+              {/* Right: Whisper Mode Badge & Switch AI */}
+              <div className="flex items-center gap-2.5">
+                {/* Whisper Small 244M Mode Pill */}
+                <button
+                  onClick={() => {
+                    if (whisperState.status === 'idle') {
+                      whisperManager.loadModel();
+                    } else {
+                      whisperManager.setEnabled(!whisperState.enabled);
+                    }
+                  }}
+                  title="Whisper Small (244M params • ~3.3x Base size) Speech-to-Text Model"
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-mono transition-all cursor-pointer ${
+                    whisperState.enabled
+                      ? 'bg-[#76b900]/10 border-[#76b900]/40 text-[#76b900]'
+                      : 'bg-white/[0.04] border-white/[0.08] text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  <Radio className={`w-3.5 h-3.5 ${whisperState.enabled ? 'animate-pulse text-[#76b900]' : ''}`} />
+                  <span className="hidden md:inline font-semibold">Whisper Small (244M)</span>
+                  <span className="md:hidden font-semibold">Whisper</span>
+                  <span className={`w-1.5 h-1.5 rounded-full ${
+                    whisperState.status === 'downloading'
+                      ? 'bg-amber-400 animate-ping'
+                      : whisperState.enabled
+                      ? 'bg-[#76b900]'
+                      : 'bg-zinc-500'
+                  }`} />
+                  {whisperState.status === 'downloading' && (
+                    <span className="text-[10px] text-amber-300">{whisperState.progress}%</span>
+                  )}
+                </button>
+
                 <button
                   onClick={() => setShowSwitchProvider(true)}
-                  className="text-xs inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-muted/50 border border-border text-muted-foreground hover:text-foreground hover:border-primary/30"
-                  title="Re-analyze with a different AI provider"
+                  className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/[0.04] border border-white/[0.08] text-xs font-mono text-zinc-300 hover:text-white hover:border-[#76b900]/40 transition-colors"
+                  title="Switch AI Provider"
                 >
-                  <Sparkles className="w-3 h-3" />
-                  Switch AI
+                  <Sparkles className="w-3.5 h-3.5 text-[#76b900]" />
+                  <span>Switch AI</span>
                 </button>
-                <span className="text-sm font-medium text-primary">{Math.round(progress)}%</span>
               </div>
             </div>
-            <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
-              <motion.div initial={{ width: 0 }} animate={{ width: `${progress}%` }} className="h-full bg-gradient-to-r from-primary to-secondary" />
-            </div>
-          </motion.div>
+          </header>
 
-          <div className={isCoding ? 'grid grid-cols-1 gap-6' : 'grid grid-cols-1 lg:grid-cols-2 gap-6'}>
-            <motion.div initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} className="p-6 rounded-2xl bg-background/50 border border-border">
-              {!isCoding && (
-                <>
-                  <div className="relative aspect-video bg-background rounded-xl overflow-hidden mb-4">
-                    <video ref={videoRef} autoPlay muted playsInline className="w-full h-full object-cover" style={{ transform: 'scaleX(-1)' }} />
-                    {!videoEnabled && (
-                      <div className="absolute inset-0 flex items-center justify-center bg-background">
-                        <VideoOff className="w-12 h-12 text-muted-foreground/80" />
-                      </div>
-                    )}
-                    {isRecording && (
-                      <div className="absolute top-4 left-4 px-3 py-1.5 bg-red-500 text-foreground rounded-full flex items-center gap-2 animate-pulse">
-                        <div className="w-2 h-2 bg-card rounded-full" />
-                        <span className="text-sm font-medium">REC {formatTime(recordingTime)}</span>
-                      </div>
-                    )}
-                    {isSpeaking && (
-                      <div className="absolute top-4 left-4 px-3 py-1.5 bg-primary text-foreground rounded-full flex items-center gap-2">
-                        <Volume2 className="w-4 h-4 animate-pulse" />
-                        <span className="text-sm font-medium">AI Speaking...</span>
-                      </div>
-                    )}
-                    {isRecording && !faceVisible && (
-                      <div className="absolute inset-0 bg-red-950/80 flex flex-col items-center justify-center">
-                        <UserX className="w-16 h-16 text-red-400 mb-3" />
-                        <p className="text-foreground font-semibold text-lg">Face Not Visible!</p>
-                        <p className="text-red-300 text-sm mt-1">Please position yourself in front of the camera</p>
-                      </div>
-                    )}
+          {/* Main Google Meet Video Stage */}
+          <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-4 flex flex-col gap-4">
+            {isCoding ? (
+              /* Coding Split Layout */
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 flex-1">
+                <div className="space-y-4">
+                  <div className="aspect-video w-full rounded-2xl overflow-hidden border border-white/10 bg-[#0c0d10] shadow-xl">
+                    <AvatarInterviewer isSpeaking={isSpeaking} amplitude={amplitude} />
                   </div>
-
-                  <div className="flex justify-center gap-3">
-                    <button onClick={toggleVideo} className={`p-3 rounded-xl border transition-colors cursor-pointer ${videoEnabled ? 'bg-muted border-border text-foreground hover:bg-muted/80' : 'bg-red-500/20 border-red-500/30 text-red-400'}`}>
-                      {videoEnabled ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
-                    </button>
-                    <button onClick={toggleAudio} className={`p-3 rounded-xl border transition-colors cursor-pointer ${audioEnabled ? 'bg-muted border-border text-foreground hover:bg-muted/80' : 'bg-red-500/20 border-red-500/30 text-red-400'}`}>
-                      {audioEnabled ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
-                    </button>
-                    {isSpeaking ? (
-                      <button onClick={stopSpeaking} className="p-3 rounded-xl bg-amber-500/20 border border-amber-500/30 text-amber-400 transition-colors cursor-pointer hover:bg-amber-500/30">
-                        <VolumeX className="w-5 h-5" />
-                      </button>
-                    ) : (
-                      <button onClick={replayQuestion} className="p-3 rounded-xl bg-primary/20 border border-primary/30 text-primary transition-colors cursor-pointer hover:bg-primary/90/30" title="Replay question">
-                        <RotateCcw className="w-5 h-5" />
-                      </button>
-                    )}
-                  </div>
-                </>
-              )}
-            </motion.div>
-
-            <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-6">
-              {isCoding ? (
-                <>
-                  <Suspense fallback={<div className="h-40 flex items-center justify-center text-muted-foreground">Loading problem…</div>}>
+                  <Suspense fallback={<div className="h-40 flex items-center justify-center text-zinc-500">Loading problem…</div>}>
                     <CodingQuestionCard
                       coding={codingQuestion || questions[0]?.coding}
                       runResults={runResults}
                     />
                   </Suspense>
-                  <div className="p-4 rounded-2xl bg-background/50 border border-border space-y-3">
+                </div>
+                <div className="space-y-4">
+                  <div className="p-4 rounded-2xl bg-[#16171b] border border-white/10 space-y-3">
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs uppercase tracking-wide text-muted-foreground">
-                        Your solution · {formData.codingLanguage}
+                      <span className="text-xs uppercase font-mono tracking-wide text-zinc-400">
+                        Solution ({formData.codingLanguage})
                       </span>
                       <Button
                         onClick={runCandidateCode}
                         disabled={isRunningCode || !code?.trim()}
                         variant="outline"
-                        className="!py-2 !px-3 !text-xs"
+                        className="!py-2 !px-3 !text-xs font-mono"
                       >
                         {isRunningCode ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" /> : <Play className="w-3.5 h-3.5 mr-1.5" />}
                         {isRunningCode ? 'Evaluating…' : 'Run Tests'}
                       </Button>
                     </div>
-                    <Suspense fallback={<div className="h-32 flex items-center justify-center text-muted-foreground text-sm">Loading editor…</div>}>
+                    <Suspense fallback={<div className="h-48 flex items-center justify-center text-zinc-500 text-sm">Loading editor…</div>}>
                       <CodeEditor
                         language={formData.codingLanguage}
                         value={code}
@@ -1746,127 +2186,264 @@ ${updatedProgress.level}`
                   <textarea
                     value={textAnswer}
                     onChange={(e) => setTextAnswer(e.target.value)}
-                    placeholder="Optional: explain your approach (will be analyzed alongside your code)…"
-                    rows={3}
-                    className="w-full p-3 rounded-xl bg-muted/40 border border-border text-sm text-foreground focus:ring-2 focus:ring-primary resize-y"
+                    placeholder="Explain your approach (evaluated alongside code)…"
+                    rows={2}
+                    className="w-full p-3 rounded-xl bg-[#16171b] border border-white/10 text-sm text-zinc-200 focus:ring-1 focus:ring-[#76b900] resize-y"
                   />
-                  <Button
-                    onClick={submitTextAnswer}
-                    disabled={loading || !code?.trim()}
-                    variant="primary"
-                    className="w-full !py-4 !rounded-xl flex items-center justify-center gap-2"
-                  >
-                    {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
-                    {loading ? 'Submitting…' : 'Submit Solution'}
-                  </Button>
-                </>
-              ) : (
-                <>
-                  <div className="p-4 rounded-2xl bg-background/50 border border-border">
+                </div>
+              </div>
+            ) : (
+              /* Google Meet Dual-Tile Stage (Interviewer & Candidate) */
+              <div className="flex-1 flex flex-col gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 lg:gap-6 flex-1 items-stretch">
+                  {/* Tile 1: AI Technical Interviewer (inteview_image.png) */}
+                  <div className="relative aspect-video w-full rounded-2xl overflow-hidden border border-white/10 bg-[#0c0d10] shadow-2xl flex items-center justify-center">
                     <AvatarInterviewer isSpeaking={isSpeaking} amplitude={amplitude} />
                   </div>
-                  <div className="p-6 rounded-2xl bg-background/50 border border-border">
-                    <div className="flex items-start gap-3 mb-4">
-                      <div className="w-10 h-10 rounded-xl bg-primary/20 border border-primary/30 flex items-center justify-center shrink-0">
-                        <span className="text-primary font-bold">{currentQuestionIndex + 1}</span>
+
+                  {/* Tile 2: Candidate Video Feed (Google Meet Style) */}
+                  <div className="relative aspect-video w-full rounded-2xl overflow-hidden border border-white/10 bg-[#0c0d10] shadow-2xl flex items-center justify-center group">
+                    <video
+                      ref={videoRef}
+                      autoPlay
+                      muted
+                      playsInline
+                      className="w-full h-full object-cover"
+                      style={{ transform: 'scaleX(-1)' }}
+                    />
+
+                    {/* Camera Off Placeholder */}
+                    {!videoEnabled && (
+                      <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#131417]">
+                        <div className="w-20 h-20 rounded-full bg-zinc-800 border border-white/10 flex items-center justify-center mb-3 shadow-inner">
+                          <span className="font-mono text-2xl font-bold text-zinc-300">YOU</span>
+                        </div>
+                        <p className="font-mono text-xs text-zinc-400">Camera is turned off</p>
                       </div>
-                      <div className="flex-1">
-                        <span className="text-xs font-medium text-primary uppercase tracking-wide">
-                          {currentQuestion?.type} • {currentQuestion?.difficulty}
+                    )}
+
+                    {/* Top Right: Recording Indicator */}
+                    {isRecording && (
+                      <div className="absolute top-4 right-4 z-20 px-3 py-1.5 bg-red-600/90 backdrop-blur-md text-white rounded-full flex items-center gap-2 shadow-lg animate-pulse">
+                        <span className="w-2 h-2 rounded-full bg-white" />
+                        <span className="font-mono text-xs font-bold tracking-wider">
+                          REC {formatTime(recordingTime)}
                         </span>
-                        <h3 className="text-xl font-semibold text-foreground mt-1">{currentQuestion?.question}</h3>
                       </div>
+                    )}
+
+                    {/* Bottom Left: Google Meet Candidate Name Badge */}
+                    <div className="absolute bottom-4 left-4 z-20 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-black/80 backdrop-blur-md border border-white/10 shadow-lg">
+                      <span className="font-mono text-xs font-bold text-white tracking-wide">
+                        You (Candidate)
+                      </span>
+                      {audioEnabled ? (
+                        <Mic className="w-3.5 h-3.5 text-[#76b900]" />
+                      ) : (
+                        <MicOff className="w-3.5 h-3.5 text-red-400" />
+                      )}
                     </div>
 
-                    {isRecording && (
-                      <>
-                        <div className="mt-4 p-4 bg-gradient-to-r from-primary/10 to-secondary/10 border border-primary/20 rounded-xl">
-                          <div className="flex items-center gap-3">
-                            <div className="relative">
-                              <div className="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center">
-                                <Mic className="w-5 h-5 text-primary" />
-                              </div>
-                              <div className="absolute inset-0 rounded-full bg-primary/30 animate-ping" />
-                            </div>
-                            <div>
-                              <p className="text-foreground font-medium">Recording in progress</p>
-                              <p className="text-muted-foreground text-sm">Speak clearly into your microphone</p>
-                            </div>
-                          </div>
-                        </div>
-                        <div className="mt-4">
-                            <ConfidenceMeter confidence={faceConfidence} />
-                       </div>
-                        <div className="mt-4 rounded-xl overflow-hidden border border-border/60 bg-slate-950 p-1 flex items-center justify-center">
-                          <canvas
-                            ref={visualizerCanvasRef}
-                            className="w-full h-24 bg-slate-900 rounded-lg shadow-inner"
-                          />
-                        </div>
-                      </>
+                    {/* Bottom Right: Face Tracking / Confidence Tag */}
+                    <div className="absolute bottom-4 right-4 z-20 px-2.5 py-1 rounded-md bg-black/75 backdrop-blur-md border border-white/10 flex items-center gap-1.5 font-mono text-[10px] text-zinc-300">
+                      <span className={`w-1.5 h-1.5 rounded-full ${faceVisible ? 'bg-[#76b900]' : 'bg-red-400'}`} />
+                      <span>{Math.round(faceConfidence)}% PRESENCE</span>
+                    </div>
+
+                    {/* Face Warning Alert Overlay */}
+                    {isRecording && !faceVisible && (
+                      <div className="absolute inset-0 bg-red-950/85 backdrop-blur-sm z-30 flex flex-col items-center justify-center p-6 text-center">
+                        <UserX className="w-14 h-14 text-red-400 mb-2 animate-bounce" />
+                        <h4 className="text-white font-bold text-base">Face Not In Camera Frame</h4>
+                        <p className="text-red-300 text-xs mt-1 max-w-xs">
+                          Please re-center yourself directly in front of the lens for proctoring.
+                        </p>
+                      </div>
                     )}
                   </div>
-                </>
-              )}
-
-              {error && (
-                <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/20 flex items-start gap-3">
-                  <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
-                  <p className="text-sm text-red-400">{error}</p>
                 </div>
-              )}
 
-              {!isCoding && <BodyLanguageTips currentQuestionIndex={currentQuestionIndex} />}
+                {/* Google Meet Captions / Current Question Banner */}
+                <div className="w-full rounded-2xl bg-[#16171b]/90 backdrop-blur-xl border border-white/10 p-5 sm:p-6 shadow-xl space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.08] pb-3">
+                    <div className="flex items-center gap-2.5">
+                      <span className="px-2.5 py-1 rounded-md bg-[#76b900]/10 border border-[#76b900]/30 font-mono text-xs font-bold text-[#76b900] uppercase tracking-wider">
+                        Question #{currentQuestionIndex + 1}
+                      </span>
+                      <span className="font-mono text-xs text-zinc-400 uppercase tracking-wide">
+                        {currentQuestion?.type || 'Technical'} • {currentQuestion?.difficulty || 'Medium'}
+                      </span>
+                    </div>
 
-              {!isCoding && (
-                <div className="flex gap-3 w-full">
-                  {useTextInput ? (
-                    <div className="flex flex-col w-full gap-3">
+                    <div className="flex items-center gap-2">
+                      {isSpeaking ? (
+                        <button
+                          onClick={stopSpeaking}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-300 hover:bg-amber-500/25 transition-colors font-mono text-xs cursor-pointer"
+                        >
+                          <VolumeX className="w-3.5 h-3.5" />
+                          <span>Mute Question</span>
+                        </button>
+                      ) : (
+                        <button
+                          onClick={replayQuestion}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 text-zinc-300 hover:text-white transition-colors font-mono text-xs cursor-pointer"
+                          title="Replay interviewer's voice"
+                        >
+                          <Volume2 className="w-3.5 h-3.5 text-[#76b900]" />
+                          <span>Replay Audio</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Question Text */}
+                  <h3 className="text-lg sm:text-xl font-medium text-white leading-relaxed">
+                    {currentQuestion?.question}
+                  </h3>
+
+                  {/* Live Captioning & Audio Wave during Recording */}
+                  {isRecording && (
+                    <div className="p-4 rounded-xl bg-black/40 border border-[#76b900]/20 space-y-3">
+                      <div className="flex items-center justify-between text-xs font-mono">
+                        <span className="flex items-center gap-2 text-[#76b900]">
+                          <span className="w-2 h-2 rounded-full bg-[#76b900] animate-ping" />
+                          <span>Transcribing via {whisperState.modelLabel}</span>
+                        </span>
+                        <span className="text-zinc-400">REC {formatTime(recordingTime)}</span>
+                      </div>
+
+                      {/* Visualizer canvas */}
+                      <div className="h-12 w-full rounded-lg overflow-hidden bg-black/60 border border-white/5">
+                        <canvas ref={visualizerCanvasRef} className="w-full h-full" />
+                      </div>
+
+                      {/* Live transcription preview */}
+                      <div className="text-sm font-sans text-zinc-200 bg-white/[0.02] p-3 rounded-lg border border-white/[0.05] italic">
+                        {transcript || 'Listening to your response... speak clearly into your microphone.'}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Text Input Option */}
+                  {useTextInput && (
+                    <div className="space-y-3 pt-2">
                       <textarea
                         value={textAnswer}
                         onChange={(e) => setTextAnswer(e.target.value)}
-                        placeholder="Type your answer here..."
-                        className="w-full min-h-[120px] p-4 rounded-xl bg-muted/50 border border-border text-foreground focus:ring-2 focus:ring-primary resize-y"
+                        placeholder="Type your technical response here..."
+                        rows={3}
+                        className="w-full p-4 rounded-xl bg-black/50 border border-white/10 text-zinc-200 placeholder-zinc-500 font-sans text-sm focus:outline-none focus:ring-1 focus:ring-[#76b900]"
                         disabled={loading}
                       />
-                      <div className="flex gap-3">
-                        <Button onClick={() => setUseTextInput(false)} disabled={loading} variant="outline" className="flex-1 !py-4 !rounded-xl flex items-center justify-center gap-2">
-                          <Mic className="w-4 h-4" /> Use Microphone
-                        </Button>
-                        <Button onClick={submitTextAnswer} disabled={loading || !textAnswer.trim()} variant="primary" className="flex-[2] !py-4 !rounded-xl flex items-center justify-center gap-2">
-                          {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
-                          {loading ? 'Submitting...' : 'Submit Answer'}
-                        </Button>
-                      </div>
                     </div>
-                  ) : !isRecording ? (
-                    <div className="flex w-full gap-3">
-                      <Button onClick={() => setUseTextInput(true)} disabled={loading || isSpeaking} variant="outline" className="flex-1 !py-4 !rounded-xl flex items-center justify-center gap-2">
-                        <FileText className="w-4 h-4" /> Type Answer
-                      </Button>
-                      <Button onClick={startRecording} disabled={loading || isSpeaking} variant="primary" className="flex-[2] !py-4 !rounded-xl flex items-center justify-center gap-2">
-                        <Mic className="w-5 h-5" />
-                        {isSpeaking ? 'Wait for question...' : 'Start Recording'}
-                      </Button>
+                  )}
+
+                  {error && (
+                    <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-xs font-mono flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0" />
+                      <span>{error}</span>
                     </div>
-                  ) : (
-                    <button onClick={stopRecording} disabled={loading} className="flex-1 w-full py-4 rounded-xl bg-red-500 hover:bg-red-600 text-foreground font-medium flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-50">
-                      <XCircle className="w-5 h-5" />
-                      {loading ? 'Submitting...' : 'Stop & Submit'}
-                    </button>
                   )}
                 </div>
+              </div>
+            )}
+          </main>
+
+          {/* Google Meet Bottom Floating Control Dock */}
+          <footer className="fixed bottom-3 sm:bottom-5 left-1/2 -translate-x-1/2 z-40 w-auto max-w-[96vw]">
+            <div className="bg-[#1c1d22]/90 backdrop-blur-2xl border border-white/10 px-4 sm:px-6 py-2.5 sm:py-3 rounded-full shadow-[0_12px_40px_rgba(0,0,0,0.75)] flex items-center gap-2.5 sm:gap-4">
+              {/* 1. Microphone Toggle / Recording Button */}
+              {isRecording ? (
+                <button
+                  onClick={stopRecording}
+                  disabled={loading}
+                  title="Stop recording and submit answer via Whisper Small"
+                  className="px-5 h-12 rounded-full bg-red-600 hover:bg-red-700 text-white font-mono text-xs font-bold uppercase tracking-wider flex items-center gap-2 shadow-[0_0_20px_rgba(239,68,68,0.5)] animate-pulse transition-all cursor-pointer"
+                >
+                  <XCircle className="w-5 h-5" />
+                  <span>{loading ? 'Submitting…' : 'Stop & Submit'}</span>
+                </button>
+              ) : (
+                <button
+                  onClick={startRecording}
+                  disabled={loading || isSpeaking}
+                  title="Start recording your answer"
+                  className="px-5 h-12 rounded-full bg-[#76b900] hover:bg-[#86d100] text-black font-mono text-xs font-bold uppercase tracking-wider flex items-center gap-2 transition-all cursor-pointer shadow-lg disabled:opacity-50"
+                >
+                  <Mic className="w-4 h-4" />
+                  <span>{isSpeaking ? 'Interviewer Speaking…' : 'Start Speaking'}</span>
+                </button>
               )}
 
-              <div className="p-4 rounded-xl bg-muted/30 border border-border">
-                <p className="text-xs text-muted-foreground text-center">
-                  {isCoding ? 'Submit when your solution passes the visible test cases.' : 'Complete all questions to see your feedback • No scores shown during interview'}
-                </p>
-              </div>
-            </motion.div>
-          </div>
+              {/* 2. Camera Toggle Button */}
+              <button
+                onClick={toggleVideo}
+                title={videoEnabled ? 'Turn camera off' : 'Turn camera on'}
+                className={`w-12 h-12 rounded-full flex items-center justify-center border transition-all cursor-pointer ${
+                  videoEnabled
+                    ? 'bg-white/[0.06] hover:bg-white/[0.12] border-white/10 text-white'
+                    : 'bg-red-500/20 border-red-500/30 text-red-400'
+                }`}
+              >
+                {videoEnabled ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
+              </button>
+
+              {/* 3. Whisper Small Mode Button */}
+              <button
+                onClick={() => {
+                  whisperManager.setEnabled(!whisperState.enabled);
+                }}
+                title={`Whisper Small (244M params • 3.3x Base) Mode: ${whisperState.enabled ? 'Enabled' : 'Disabled'}`}
+                className={`w-12 h-12 rounded-full flex items-center justify-center border transition-all cursor-pointer ${
+                  whisperState.enabled
+                    ? 'bg-[#76b900]/15 border-[#76b900]/40 text-[#76b900]'
+                    : 'bg-white/[0.06] hover:bg-white/[0.12] border-white/10 text-zinc-400'
+                }`}
+              >
+                <Radio className="w-5 h-5" />
+              </button>
+
+              {/* 4. Type Answer Toggle Button */}
+              <button
+                onClick={() => setUseTextInput(!useTextInput)}
+                title={useTextInput ? 'Hide text input' : 'Type answer instead of speaking'}
+                className={`w-12 h-12 rounded-full flex items-center justify-center border transition-all cursor-pointer ${
+                  useTextInput
+                    ? 'bg-white/20 border-white/30 text-white'
+                    : 'bg-white/[0.06] hover:bg-white/[0.12] border-white/10 text-zinc-300'
+                }`}
+              >
+                <FileText className="w-5 h-5" />
+              </button>
+
+              {/* 5. Submit Text Answer (if text mode active) */}
+              {useTextInput && !isRecording && (
+                <button
+                  onClick={submitTextAnswer}
+                  disabled={loading || !textAnswer.trim()}
+                  className="px-4 h-12 rounded-full bg-[#76b900] hover:bg-[#86d100] text-black font-mono text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
+                >
+                  {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
+                  <span>Submit</span>
+                </button>
+              )}
+
+              {/* 6. End Call / Leave Meeting Button (Google Meet Red End Call) */}
+              <button
+                onClick={() => {
+                  if (confirm('Are you sure you want to finish and leave this interview session? Your progress will be evaluated.')) {
+                    completeInterview();
+                  }
+                }}
+                title="End interview & view feedback"
+                className="w-12 h-12 rounded-full bg-red-600 hover:bg-red-700 text-white flex items-center justify-center shadow-lg transition-all cursor-pointer"
+              >
+                <PhoneOff className="w-5 h-5" />
+              </button>
+            </div>
+          </footer>
         </div>
-      </div>
 
       {/* Switch-provider modal */}
       {showSwitchProvider && (

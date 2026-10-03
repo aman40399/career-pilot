@@ -167,7 +167,7 @@ function ProtectedRoute({ children }) {
       <div className="min-h-screen flex items-center justify-center bg-background">
         <div className="flex flex-col items-center gap-4">
           <div className="w-12 h-12 border-4 border-muted border-t-primary rounded-full animate-spin"></div>
-          <p className="text-muted-foreground font-medium">Loading CareerPilot...</p>
+          <p className="text-muted-foreground font-medium">Loading xInterview...</p>
         </div>
       </div>
     );
@@ -189,7 +189,7 @@ function PublicRoute({ children }) {
       <div className="min-h-screen flex items-center justify-center bg-background">
         <div className="flex flex-col items-center gap-4">
           <div className="w-12 h-12 border-4 border-muted border-t-primary rounded-full animate-spin"></div>
-          <p className="text-muted-foreground font-medium">Loading CareerPilot...</p>
+          <p className="text-muted-foreground font-medium">Loading xInterview...</p>
         </div>
       </div>
     );

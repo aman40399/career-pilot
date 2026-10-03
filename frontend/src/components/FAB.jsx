@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Plus, FileText, Briefcase, Search, Mic } from "lucide-react";
+import { Plus, FileText, Brain, Mic, Code2, Rocket } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
 export default function FAB({ scrollContainerRef }) {
@@ -10,24 +10,29 @@ export default function FAB({ scrollContainerRef }) {
 
   const actions = [
     {
-      label: "Create Portfolio",
-      icon: <FileText size={18} />,
-      onClick: () => navigate("/portfolio"),
+      label: "Resume Analysis",
+      icon: <FileText size={16} className="text-[#76b900]" />,
+      onClick: () => navigate("/resume-roast/analyze"),
     },
     {
-      label: "Upload Resume",
-      icon: <Briefcase size={18} />,
-      onClick: () => navigate("/upload"),
+      label: "AI Interviewer",
+      icon: <Brain size={16} className="text-[#76b900]" />,
+      onClick: () => navigate("/mock-interview/practice?mode=technical"),
     },
     {
-      label: "Search Jobs",
-      icon: <Search size={18} />,
-      onClick: () => navigate("/jobs"),
+      label: "Communication Test",
+      icon: <Mic size={16} className="text-[#76b900]" />,
+      onClick: () => navigate("/mock-interview/practice?mode=behavioral"),
     },
     {
-      label: "Start Interview",
-      icon: <Mic size={18} />,
-      onClick: () => navigate("/interview"),
+      label: "Coding Test",
+      icon: <Code2 size={16} className="text-[#76b900]" />,
+      onClick: () => navigate("/mock-interview/practice?mode=coding"),
+    },
+    {
+      label: "Full Interview",
+      icon: <Rocket size={16} className="text-[#76b900]" />,
+      onClick: () => navigate("/mock-interview/practice?mode=mixed"),
     },
   ];
 
@@ -36,9 +41,9 @@ export default function FAB({ scrollContainerRef }) {
     const mainContainer = scrollContainerRef?.current;
 
     const handleScroll = () => {
-      if (!mainContainer) return;
-
-      const currentScrollY = mainContainer.scrollTop;
+      const currentScrollY = (mainContainer && mainContainer.scrollTop > 0)
+        ? mainContainer.scrollTop
+        : (window.scrollY || document.documentElement.scrollTop || 0);
 
       setIsVisible(
         currentScrollY < lastScrollY || currentScrollY < 100
@@ -47,9 +52,11 @@ export default function FAB({ scrollContainerRef }) {
       lastScrollY = currentScrollY;
     };
 
-    mainContainer?.addEventListener("scroll", handleScroll);
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    mainContainer?.addEventListener("scroll", handleScroll, { passive: true });
 
     return () => {
+      window.removeEventListener("scroll", handleScroll);
       mainContainer?.removeEventListener("scroll", handleScroll);
     };
   }, [scrollContainerRef]);
@@ -80,7 +87,7 @@ export default function FAB({ scrollContainerRef }) {
     <motion.div className="fixed bottom-6 right-6 z-50">
       <AnimatePresence>
         {isVisible && (
-          <div className="flex flex-col-reverse items-end gap-3">
+          <div className="flex flex-col-reverse items-end gap-2">
             <motion.button
               type="button"
               initial={{ scale: 0 }}
@@ -91,18 +98,18 @@ export default function FAB({ scrollContainerRef }) {
                 isOpen ? "Close quick actions" : "Open quick actions"
               }
               aria-expanded={isOpen}
-              className="p-4 bg-primary text-primary-foreground rounded-full shadow-xl hover:scale-110 transition-transform glow"
+              className="w-11 h-11 flex items-center justify-center bg-[#76b900] text-black rounded-[2px] shadow-[0_4px_16px_rgba(118,185,0,0.3)] hover:bg-[#5a8d00] transition-colors border border-[#8ce300]"
             >
               <motion.div animate={{ rotate: isOpen ? 45 : 0 }}>
-                <Plus size={24} />
+                <Plus size={20} className="stroke-[2.5]" />
               </motion.div>
             </motion.button>
 
             {isOpen && (
               <motion.div
-                initial={{ opacity: 0, y: 10 }}
+                initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
-                className="flex flex-col gap-2 mb-2"
+                className="flex flex-col gap-1.5 mb-1"
                 role="menu"
                 aria-label="Quick actions"
               >
@@ -113,11 +120,14 @@ export default function FAB({ scrollContainerRef }) {
                     role="menuitem"
                     tabIndex={0}
                     aria-label={action.label}
-                    onClick={() => action.onClick?.()}
-                    className="flex items-center gap-3 px-4 py-2 glass border-border rounded-full shadow-lg hover:bg-primary/10 hover:text-primary transition-all-300 hover:-translate-y-1 whitespace-nowrap"
+                    onClick={() => {
+                      setIsOpen(false);
+                      action.onClick?.();
+                    }}
+                    className="flex items-center gap-2.5 px-3.5 py-2 bg-[#0e0e0e] text-white border border-[#242424] hover:border-[#76b900] rounded-[2px] shadow-xl hover:bg-[#161616] transition-all whitespace-nowrap font-mono text-xs uppercase tracking-wider"
                   >
                     {action.icon}
-                    <span className="text-sm font-medium">
+                    <span>
                       {action.label}
                     </span>
                   </button>

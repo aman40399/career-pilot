@@ -4,7 +4,22 @@ import { encryptKey, decryptKey } from '../utils/encryption';
 // ---------------------------------------------------------------------------
 // Provider metadata – UI labels, default models, key URLs, etc.
 // ---------------------------------------------------------------------------
+export const DEFAULT_NVIDIA_CONFIG = {
+  apiKey: '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',
+  model: 'nvidia/nemotron-3-super-120b-a12b',
+  baseUrl: 'https://integrate.api.nvidia.com/v1',
+};
+
 export const PROVIDER_META = {
+  nvidia: {
+    name: 'NVIDIA NIM',
+    tagline: 'Nemotron 3 120B — High-Throughput Inference',
+    icon: '⚡',
+    keyUrl: 'https://build.nvidia.com',
+    defaultModel: 'nvidia/nemotron-3-super-120b-a12b',
+    color: 'emerald',
+    models: ['nvidia/nemotron-3-super-120b-a12b'],
+  },
   gemini: {
     name: 'Google Gemini',
     tagline: 'Fast & affordable — free tier available',
@@ -147,23 +162,48 @@ const migrateFromLegacy = () => {
 
 /** Load initial state from localStorage (v2) or migrate from legacy. */
 const hydrate = () => {
-  const defaults = { activeProvider: '', providers: {} };
+  const defaultNvidiaEntry = {
+    apiKey: encryptKey(DEFAULT_NVIDIA_CONFIG.apiKey),
+    model: DEFAULT_NVIDIA_CONFIG.model,
+    baseUrl: DEFAULT_NVIDIA_CONFIG.baseUrl,
+    validated: true,
+    lastValidated: new Date().toISOString(),
+  };
+
+  const defaultState = {
+    activeProvider: 'nvidia',
+    providers: {
+      nvidia: defaultNvidiaEntry,
+    },
+  };
 
   try {
     // First, try the v2 format
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
+      const mergedProviders = {
+        nvidia: defaultNvidiaEntry,
+        ...(parsed.providers || {}),
+      };
+      if (!mergedProviders.nvidia?.apiKey) {
+        mergedProviders.nvidia = defaultNvidiaEntry;
+      }
       return {
-        activeProvider: parsed.activeProvider || '',
-        providers: parsed.providers || {},
+        activeProvider: parsed.activeProvider || 'nvidia',
+        providers: mergedProviders,
       };
     }
 
     // Fall back to legacy migration
     const migrated = migrateFromLegacy();
     if (migrated) {
-      // Persist migrated data in v2 format immediately
+      if (!migrated.providers.nvidia) {
+        migrated.providers.nvidia = defaultNvidiaEntry;
+      }
+      if (!migrated.activeProvider) {
+        migrated.activeProvider = 'nvidia';
+      }
       localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
       return migrated;
     }
@@ -171,7 +211,11 @@ const hydrate = () => {
     console.error('[useAIConfigStore] Hydration failed:', e);
   }
 
-  return defaults;
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(defaultState));
+  } catch (e) {}
+
+  return defaultState;
 };
 
 // ---------------------------------------------------------------------------
@@ -268,23 +312,26 @@ export const useAIConfigStore = create((set, get) => ({
   getActiveConfig: () => {
     let { activeProvider, providers } = get();
     
-    if (!activeProvider) {
-      const configuredProviders = Object.keys(providers).filter((key) => !!providers[key]?.apiKey);
+    if (!activeProvider || !providers[activeProvider]?.apiKey) {
+      const configuredProviders = Object.keys(providers || {}).filter((key) => !!providers[key]?.apiKey);
       if (configuredProviders.length > 0) {
         activeProvider = configuredProviders[0];
       } else {
-        return null;
+        activeProvider = 'nvidia';
       }
     }
 
-    const entry = providers[activeProvider];
-    if (!entry || !entry.apiKey) return null;
+    const entry = providers?.[activeProvider] || {
+      apiKey: encryptKey(DEFAULT_NVIDIA_CONFIG.apiKey),
+      model: DEFAULT_NVIDIA_CONFIG.model,
+      baseUrl: DEFAULT_NVIDIA_CONFIG.baseUrl,
+    };
 
     return {
-      provider: activeProvider,
-      apiKey: decryptKey(entry.apiKey),
-      model: entry.model || PROVIDER_META[activeProvider]?.defaultModel || '',
-      baseUrl: entry.baseUrl || '',
+      provider: activeProvider || 'nvidia',
+      apiKey: decryptKey(entry.apiKey) || DEFAULT_NVIDIA_CONFIG.apiKey,
+      model: entry.model || PROVIDER_META[activeProvider]?.defaultModel || DEFAULT_NVIDIA_CONFIG.model,
+      baseUrl: entry.baseUrl || DEFAULT_NVIDIA_CONFIG.baseUrl,
     };
   },
 

@@ -87,17 +87,10 @@ import { validateEmailConfig } from './utils/emailConfig.js';
 // Configuration validation - Check for required API keys (dev only)
 // ==========================================================================
 if (process.env.NODE_ENV === 'development') {
-  if (!process.env.GEMINI_API_KEY) {
-    console.warn('⚠️  GEMINI_API_KEY is not configured - AI features will be unavailable.');
-    console.warn('   Set GEMINI_API_KEY in your .env file to enable Google Gemini features.');
-  }
-
-  if (!process.env.GROQ_API_KEY) {
-    console.warn('⚠️  GROQ_API_KEY is not configured - Groq AI provider will not be available.');
-  }
-
-  if (!process.env.OPENAI_API_KEY) {
-    console.warn('⚠️  OPENAI_API_KEY is not configured - OpenAI provider will not be available.');
+  if (process.env.NVIDIA_API_KEY) {
+    console.log(`🤖 AI Provider active: NVIDIA (${process.env.NVIDIA_MODEL || 'nvidia/nemotron-3-super-120b-a12b'})`);
+  } else if (!process.env.GEMINI_API_KEY && !process.env.OPENAI_API_KEY) {
+    console.warn('⚠️  No AI API key configured - AI features will be unavailable.');
   }
 }
 
